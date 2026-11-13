@@ -16,9 +16,9 @@ afterEach(() => {
 // A transport whose requests stay pending until the test answers them, so interleavings can be scripted.
 function fakeServer() {
   const pending = [];
-  const transport = (method, body) =>
+  const transport = (method, path, body) =>
     new Promise((resolve, reject) => {
-      pending.push({ method, body, resolve, reject });
+      pending.push({ method, path, body, resolve, reject });
     });
   return {
     transport,

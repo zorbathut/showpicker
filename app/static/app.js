@@ -203,13 +203,13 @@ async function detailsLoadAll() {
 
 // ------------------------------------------------------------------ lineup
 
-async function lineupTransport(method, body) {
-  const r = await fetch("/api/lineup", method === "GET" ? {} : { method, headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+async function syncTransport(method, path, body) {
+  const r = await fetch(path, method === "GET" ? {} : { method, headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
   const json = (r.headers.get("content-type") || "").includes("application/json") ? await r.json() : null;
   return { status: r.status, body: json };
 }
 
-const sync = syncCreate(lineupTransport, {
+const sync = syncCreate(syncTransport, {
   onAdopt(keys) {
     state.lineup = [...keys];
     state.replaceAt = null;

@@ -2,7 +2,7 @@
 //
 // The server holds one lineup with an (instance, version) stamp; a PUT must name the stamp it was based on or gets 409 with the current state (see `api_lineup_put` in app/main.py). This module serializes this screen's PUTs, polls for other screens' changes, and decides which server states to adopt.
 //
-// `transport(method, body)` performs GET or PUT on /api/lineup and resolves to {status, body}; it rejects only on network failure. Callbacks:
+// `transport(method, path, body)` performs a request and resolves to {status, body}; it rejects only on network failure. Callbacks:
 // - onAdopt(keys): the lineup was replaced from the server.
 // - onConflict(): another screen changed the lineup first, so this screen's latest edit was dropped.
 // - onRefused(message): the server refused an edit (a bug or a bad import); the server's lineup is taken on the next poll.
@@ -53,7 +53,7 @@ export function syncCreate(transport, callbacks) {
         s.dirty = false;
         let res;
         try {
-          res = await transport("PUT", { base_instance: s.instance, base_version: s.version, keys: s.keys });
+          res = await transport("PUT", "/api/lineup", { base_instance: s.instance, base_version: s.version, keys: s.keys });
         } catch (e) {
           s.unsynced = true;
           connection(false, e);
@@ -94,7 +94,7 @@ export function syncCreate(transport, callbacks) {
     }
     let res;
     try {
-      res = await transport("GET", null);
+      res = await transport("GET", "/api/lineup", null);
     } catch (e) {
       connection(false, e);
       return;
