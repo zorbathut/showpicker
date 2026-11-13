@@ -37,6 +37,8 @@ IMAGE_MAX_W = 3840
 IMAGE_CACHE_HEADER = "public, max-age=604800"
 SEARCH_QUERY_MAX = 200
 LINEUP_MAX = 50
+HIDDEN_MAX = 2000
+HIDDEN_IMAGE_MAX_LEN = 1000
 
 
 class LineupPut(BaseModel):
@@ -45,6 +47,16 @@ class LineupPut(BaseModel):
     base_instance: str
     base_version: int
     keys: list[str]
+
+
+class HiddenPost(BaseModel):
+    """Hide or unhide one picture of a title; `image: null` with `hidden: false` unhides all of that title's pictures."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    key: str
+    image: str | None
+    hidden: bool
 
 
 def lineup_problem(keys: list[str]) -> str | None:
@@ -70,6 +82,9 @@ def app_create(config: Config, transport: httpx.AsyncBaseTransport | None, clock
     cache: dict[str, tuple[float, dict]] = {}
     # `instance` changes whenever the server restarts, so clients can tell a fresh (empty) lineup from an old version of the one they had.
     lineup = {"instance": uuid.uuid4().hex, "version": 0, "keys": []}
+    # Pictures hidden as spoilers, per title key, by image id (the picture's `full` URL). Versioned separately from the lineup so hiding never makes a lineup edit conflict. Ids come from clients: only ever compared, never rendered.
+    hidden: dict[str, list[str]] = {}
+    hidden_state = {"version": 0}
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
@@ -158,9 +173,42 @@ def app_create(config: Config, transport: httpx.AsyncBaseTransport | None, clock
         cache[key] = (clock() + (CACHE_DEGRADED_TTL_S if draft.degraded else CACHE_TTL_S), payload)
         return payload
 
+    def hidden_payload() -> dict:
+        return {"instance": lineup["instance"], "hidden_version": hidden_state["version"], "hidden": hidden}
+
     @app.get("/api/lineup")
     async def api_lineup_get():
-        return lineup
+        return {**lineup, **hidden_payload()}
+
+    @app.post("/api/hidden")
+    async def api_hidden_post(body: HiddenPost):
+        try:
+            title_key_parse(body.key)
+        except ErrorTitleKey as e:
+            raise HTTPException(400, str(e)) from e
+        if body.image is None:
+            if body.hidden:
+                raise HTTPException(400, "Name the picture to hide")
+            changed = hidden.pop(body.key, None) is not None
+        else:
+            if not body.image or len(body.image) > HIDDEN_IMAGE_MAX_LEN:
+                raise HTTPException(400, f"Picture id must be 1-{HIDDEN_IMAGE_MAX_LEN} characters")
+            pictures = hidden.get(body.key, [])
+            present = body.image in pictures
+            if body.hidden and not present:
+                if sum(len(v) for v in hidden.values()) >= HIDDEN_MAX:
+                    raise HTTPException(400, f"Too many hidden pictures ({HIDDEN_MAX} max); unhide some first")
+                hidden[body.key] = [*pictures, body.image]
+            elif not body.hidden and present:
+                remaining = [p for p in pictures if p != body.image]
+                if remaining:
+                    hidden[body.key] = remaining
+                else:
+                    del hidden[body.key]
+            changed = body.hidden != present
+        if changed:
+            hidden_state["version"] += 1
+        return hidden_payload()
 
     @app.put("/api/lineup")
     async def api_lineup_put(body: LineupPut):

@@ -17,6 +17,7 @@ const state = {
   replaceAt: null, // index the next pick goes to (the "wrong match" flow)
   undo: null, // the lineup before the last Clear, while no other edit has happened since
   winnerKey: null, // the 🎲 result, highlighted until the next pick
+  hidden: {}, // title key -> ids (full URLs) of pictures hidden as spoilers, mirrored from the sync module
 };
 
 // ------------------------------------------------------------------ utils
@@ -87,8 +88,8 @@ function notice(msg, ms) {
 }
 
 // A notice with one action button.
-function noticeAction(msg, label, action) {
-  notice(msg, NOTICE_STICKY);
+function noticeAction(msg, ms, label, action) {
+  notice(msg, ms);
   const button = document.createElement("button");
   button.type = "button";
   button.textContent = label;
@@ -118,7 +119,7 @@ document.addEventListener(
     if (img.matches(".show-logo")) {
       showLogoFailed();
     } else {
-      (img.closest(".show-cell") ?? img).hidden = true;
+      (img.closest(".show-cell, .still") ?? img).hidden = true;
     }
   },
   true,
@@ -222,6 +223,13 @@ const sync = syncCreate(syncTransport, {
   },
   onRefused(message) {
     reportError(new Error(`The server refused that lineup: ${message}`));
+  },
+  onHidden(map) {
+    state.hidden = map;
+    render();
+  },
+  onHideRefused(message) {
+    reportError(new Error(`Couldn't hide or unhide that picture: ${message}`));
   },
   onConnection(ok, error) {
     if (!ok) {
@@ -356,8 +364,11 @@ async function lineupImportOld() {
   if (state.lineup.length) {
     forget();
     if (fromHash.length) {
-      noticeAction(`This link has an old saved lineup (${plural(keys.length, "title")}), but there's already a lineup in use.`, "Replace it", () =>
-        lineupImport(keys, () => {}).catch(reportError),
+      noticeAction(
+        `This link has an old saved lineup (${plural(keys.length, "title")}), but there's already a lineup in use.`,
+        NOTICE_STICKY,
+        "Replace it",
+        () => lineupImport(keys, () => {}).catch(reportError),
       );
     } else {
       console.info("ignoring the old saved lineup because the server already has one:", keys);
@@ -386,6 +397,17 @@ async function lineupImport(keys, onSaved) {
   notice(parts.join(" "), NOTICE_LONG_MS);
 }
 
+// A title's pictures minus the ones hidden as spoilers. Everything that shows pictures goes through this.
+function galleryOf(d) {
+  const hidden = state.hidden[d.key];
+  return hidden ? d.gallery.filter((p) => !hidden.includes(p.full)) : d.gallery;
+}
+
+function pictureHide(key, image) {
+  sync.hide(key, image, true).catch(reportError);
+  noticeAction("Picture hidden.", NOTICE_LONG_MS, "Undo", () => sync.hide(key, image, false).catch(reportError));
+}
+
 function cardFlash(i) {
   const el = $(`#grid .card[data-i="${i}"]`);
   if (!el) {
@@ -398,6 +420,10 @@ function cardFlash(i) {
 }
 
 // ------------------------------------------------------------------ grid
+
+function hideButton(image) {
+  return `<button type="button" class="hide" data-act="hide" data-image="${esc(image)}" title="Hide this picture (spoiler)">⊘</button>`;
+}
 
 function cardHtml(key, i) {
   const d = state.details[key];
@@ -417,8 +443,10 @@ function cardHtml(key, i) {
     return `<article class="card" ${attrs}><div class="hero"><h2 class="logo-text">?</h2></div>
       <div class="body"><div class="meta">Couldn't load <code>${esc(key)}</code>: ${esc(d.error)}</div></div>${actions}</article>`;
   }
-  const hero = d.gallery[0]?.full || d.poster;
-  const strip = d.gallery.slice(1, 5);
+  const gallery = galleryOf(d);
+  const hero = gallery[0]?.full || d.poster;
+  const strip = gallery.slice(1, 5);
+  const hiddenCount = d.gallery.length - gallery.length;
   return `
     <article class="card${key === state.winnerKey ? " winner" : ""}" ${attrs}>
       <div class="hero" data-act="show" data-img="0" ${hero ? `style="background-image:${esc(cssUrl(hero))}"` : ""}>
@@ -427,11 +455,17 @@ function cardHtml(key, i) {
       </div>
       <div class="body">
         <div class="meta">${d.logo ? `<b>${esc(d.title)}</b> · ` : ""}${metaParts(d).map(esc).join(" · ")}</div>
+        ${hiddenCount ? `<button type="button" class="unhide" data-act="unhide" title="Show the pictures hidden as spoilers">${plural(hiddenCount, "picture")} hidden · show all</button>` : ""}
         ${d.genres.length ? `<div class="genres">${d.genres.slice(0, 4).map(esc).join(" · ")}</div>` : ""}
         ${d.overview ? `<p class="overview">${esc(d.overview)}</p>` : ""}
         ${
           strip.length
-            ? `<div class="stills">${strip.map((p, n) => `<img loading="lazy" src="${esc(p.thumb)}" alt="" data-act="show" data-img="${n + 1}">`).join("")}</div>`
+            ? `<div class="stills">${strip
+                .map(
+                  (p, n) =>
+                    `<span class="still"><img loading="lazy" src="${esc(p.thumb)}" alt="" data-act="show" data-img="${n + 1}">${hideButton(p.full)}</span>`,
+                )
+                .join("")}</div>`
             : ""
         }
       </div>
@@ -464,6 +498,12 @@ $("#grid").addEventListener("click", (ev) => {
       break;
     case "show":
       showOpen(card.dataset.key, Number(t.dataset.img));
+      break;
+    case "hide":
+      pictureHide(card.dataset.key, t.dataset.image);
+      break;
+    case "unhide":
+      sync.hide(card.dataset.key, null, false).catch(reportError);
       break;
     case "redo": {
       const d = state.details[state.lineup[i]];
@@ -627,7 +667,7 @@ q.addEventListener("paste", (ev) => {
 const show = $("#show");
 const showScroll = $(".show-scroll", show);
 const showGallery = $(".show-gallery", show);
-// `key` is the title being presented; its index is derived from the lineup on every paint, so edits elsewhere never move the presentation to a different title. `painted` is what the gallery DOM currently shows: it's rebuilt only when the title or its details change, so unrelated re-renders don't reset the scroll position.
+// `key` is the title being presented; its index is derived from the lineup on every paint, so edits elsewhere never move the presentation to a different title. `painted` is what the gallery DOM currently shows ({key, d, sig}, where sig covers the details' state and the ids of the cells drawn): the gallery is rebuilt only when that changes, so unrelated re-renders don't disturb it.
 const showState = { key: null, i: 0, painted: null, idleTimer: null };
 
 function showIsOpen() {
@@ -642,7 +682,7 @@ function showOpen(key, imageIndex) {
   showState.key = key;
   showState.painted = null;
   show.hidden = false;
-  // Notices must be visible over the presentation, including in fullscreen, where only #show is shown.
+  // Notices (e.g. "Picture hidden. Undo") must be visible over the presentation, including in fullscreen, where only #show is shown.
   show.append($("#status"), $("#notice"));
   document.body.classList.add("showing");
   showScroll.focus({ preventScroll: true });
@@ -685,11 +725,31 @@ function showPaint() {
 
   const key = showState.key;
   const d = key ? state.details[key] : null;
-  if (showState.painted && showState.painted.key === key && showState.painted.d === d) {
+  const gallery = d && !d.error ? galleryOf(d) : [];
+  const posterOnly = Boolean(!gallery.length && d?.poster);
+  const cells = posterOnly ? [{ full: d.poster }] : gallery;
+  const ids = cells.map((p) => p.full);
+  const loaded = d ? (d.error ?? "ok") : null;
+  const painted = showState.painted;
+  const sameTitle = painted && painted.key === key && painted.loaded === loaded && painted.posterOnly === posterOnly;
+  if (sameTitle && ids.join("\n") === painted.ids.join("\n")) {
     return;
   }
-  showState.painted = { key, d };
-  showScroll.scrollTop = 0;
+  showState.painted = { key, d, loaded, posterOnly, ids };
+
+  // Only removals (pictures hidden here or on another screen): drop those cells in place rather than rebuilding, so nothing reloads or flashes.
+  if (sameTitle && isSubsequence(ids, painted.ids)) {
+    const keep = new Set(ids);
+    showKeepPlace(keep, () => {
+      for (const cell of [...showGallery.children]) {
+        if (!keep.has(cell.dataset.image)) {
+          cell.remove();
+        }
+      }
+    });
+    showLayout();
+    return;
+  }
 
   const logo = $(".show-logo", show);
   const name = $(".show-name", show);
@@ -709,17 +769,23 @@ function showPaint() {
       : [...metaParts(d), ...(d.genres.length ? [d.genres.slice(0, 3).join(", ")] : [])].join("  ·  ");
   $(".show-tagline", show).textContent = d?.tagline || "";
 
-  const gallery = d && !d.error ? d.gallery : [];
-  const posterOnly = !gallery.length && d?.poster;
-  const cells = posterOnly ? [{ full: d.poster }] : gallery;
-  const cols = showColumns(cells.length);
-  show.style.setProperty("--cols", cols);
-  show.style.setProperty("--fit-rows", Math.min(2, Math.max(1, Math.ceil(cells.length / cols))));
-  showGallery.classList.toggle("poster-only", Boolean(posterOnly));
-  showGallery.innerHTML = cells
-    .map((p, i) => `<div class="show-cell"><img src="${esc(p.full)}" alt="" ${i >= SHOW_EAGER_IMAGES ? 'loading="lazy"' : ""}></div>`)
-    .join("");
-  $(".show-bg", show).style.backgroundImage = gallery[0] ? cssUrl(gallery[0].thumb) : "";
+  const rebuild = () => {
+    showGallery.classList.toggle("poster-only", posterOnly);
+    showGallery.innerHTML = cells
+      .map(
+        (p, i) =>
+          `<div class="show-cell" data-image="${esc(p.full)}"><img src="${esc(p.full)}" alt="" ${i >= SHOW_EAGER_IMAGES ? 'loading="lazy"' : ""}>${posterOnly ? "" : hideButton(p.full)}</div>`,
+      )
+      .join("");
+    showLayout();
+  };
+  if (sameTitle) {
+    // Same title, pictures added back (Undo, "show all"): keep the viewer's place.
+    showKeepPlace(new Set(ids), rebuild);
+  } else {
+    rebuild();
+    showScroll.scrollTop = 0;
+  }
 
   if (key && !d) {
     showLoad(key).catch(reportError);
@@ -727,6 +793,50 @@ function showPaint() {
     showPrefetchNext().catch(reportError);
   }
 }
+
+function isSubsequence(items, of) {
+  let j = 0;
+  for (const item of of) {
+    if (j < items.length && items[j] === item) {
+      j++;
+    }
+  }
+  return j === items.length;
+}
+
+// Column count, rows that fit on the first screen, and the blurred background all follow the cells currently in the gallery.
+function showLayout() {
+  const cells = [...showGallery.children];
+  const cols = showColumns(cells.length);
+  show.style.setProperty("--cols", cols);
+  show.style.setProperty("--fit-rows", Math.min(2, Math.max(1, Math.ceil(cells.length / cols))));
+  const first = showState.painted?.d && !showState.painted.d.error ? galleryOf(showState.painted.d)[0] : null;
+  $(".show-bg", show).style.backgroundImage = first ? cssUrl(first.thumb) : "";
+}
+
+// Runs `mutate` (which changes the gallery's cells) without moving what the viewer is looking at: the first visible cell that survives stays at the same height on screen. At the very top, stay at the top, so the title band stays in view.
+function showKeepPlace(keep, mutate) {
+  if (showScroll.scrollTop === 0) {
+    mutate();
+    return;
+  }
+  const top = showScroll.getBoundingClientRect().top;
+  const anchor = [...showGallery.children].find((cell) => cell.getBoundingClientRect().bottom > top && keep.has(cell.dataset.image));
+  const id = anchor?.dataset.image;
+  const before = anchor?.getBoundingClientRect().top;
+  mutate();
+  const after = id ? showGallery.querySelector(`.show-cell[data-image="${CSS.escape(id)}"]`) : null;
+  if (after) {
+    showScroll.scrollTop += after.getBoundingClientRect().top - before;
+  }
+}
+
+showGallery.addEventListener("click", (ev) => {
+  const button = ev.target.closest("[data-act=hide]");
+  if (button && showState.painted) {
+    pictureHide(showState.painted.key, button.dataset.image);
+  }
+});
 
 function showLogoFailed() {
   $(".show-logo", show).hidden = true;
@@ -745,7 +855,7 @@ async function showPrefetchNext() {
   const nextKey = state.lineup[(showState.i + 1) % state.lineup.length];
   const next = await detailsEnsure(nextKey);
   if (!next.error) {
-    for (const p of next.gallery.slice(0, SHOW_EAGER_IMAGES)) {
+    for (const p of galleryOf(next).slice(0, SHOW_EAGER_IMAGES)) {
       new Image().src = p.full;
     }
   }
@@ -820,7 +930,7 @@ $("#clear").addEventListener("click", () => {
   const prev = [...state.lineup];
   lineupEdit([]);
   state.undo = prev;
-  noticeAction("Cleared.", "Undo", () => {
+  noticeAction("Cleared.", NOTICE_STICKY, "Undo", () => {
     if (!state.undo) {
       notice("Can't undo: the lineup has changed since.", NOTICE_MS);
       return;
@@ -878,6 +988,7 @@ async function boot() {
       }
       const server = await api("/api/lineup");
       sync.start(server);
+      state.hidden = sync.hidden();
       state.lineup = [...server.keys];
       break;
     } catch (e) {

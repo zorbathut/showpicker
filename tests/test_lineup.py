@@ -11,7 +11,9 @@ def put(client, base, keys):
 
 
 def current(client):
-    return client.get("/api/lineup").json()
+    """The lineup part of GET /api/lineup (it also carries hidden pictures, tested in test_hidden.py)."""
+    state = client.get("/api/lineup").json()
+    return {k: state[k] for k in ("instance", "version", "keys")}
 
 
 def test_starts_empty(client):

@@ -9,7 +9,7 @@ A small web app for choosing what to watch: type in some movie/series names and 
 - `app/jellyfin.py`, `app/tmdb.py` — one class per source; both produce `TitleDraft`s.
 - `app/title.py` — the shared title shape: key format (`title_key_parse`/`title_key_format`; persisted, since old saved links carry keys), search hits, image pairs, gallery ordering.
 - `app/redact.py` — `describe()`, for error text that may carry keys.
-- `app/static/` — the frontend: plain JavaScript ES modules (no build step, no framework). `sync.js` keeps the shared lineup in step with the server (tested in `tests/js/` with `node --test`); `app.js` is everything else.
+- `app/static/` — the frontend: plain JavaScript ES modules (no build step, no framework). `sync.js` keeps the shared lineup and hidden (spoiler) pictures in step with the server (tested in `tests/js/` with `node --test`); `app.js` is everything else.
 - `tests/` — pytest against `httpx.MockTransport` fakes of both upstreams (`tests/fakes.py`); `-m live` runs against the real servers in `config.env`.
 - `config.env` (git-ignored; template `config.env.example`) — `JELLYFIN_URL`, `JELLYFIN_API_KEY`, optional `JELLYFIN_USER_ID`, `TMDB_API_KEY`. The user prefers non-dotfile names for config.
 - Runs as a Docker container: `docker compose up -d --build`, serves on port 8000.

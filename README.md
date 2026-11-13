@@ -21,8 +21,9 @@ Then open http://localhost:8000. If the container keeps restarting, the configur
 * Type a title and press Enter to add the top match, or use ↑/↓ to choose another. Paste a list (one title per line) to add them all at once.
 * On each card: ◀ ▶ reorder, ↺ re-search (wrong match), ✕ remove.
 * **▶ Present** opens a fullscreen gallery: the title's logo and details, then its images six to a screen. ↑/↓ scroll a row, ←/→ (or PageUp/PageDown, for presenter clickers) change title, Esc exits. Clicking a card's picture opens it at that picture.
+* **⊘** on a picture (hover a card's thumbnail, or a picture in Present) hides it as a spoiler, on every screen; the notice that follows has an Undo, and a card with hidden pictures offers "N pictures hidden · show all". Curate on a laptop before presenting; a TV remote can't hide pictures.
 * **🎲 Pick one** picks a title at random.
-* The lineup is kept on the server and shared by everyone viewing the page: set it up on a laptop, open the page on the TV, and it's there. Changes show up on other screens within a few seconds. It's held in memory, so restarting the server clears it.
+* The lineup is kept on the server and shared by everyone viewing the page: set it up on a laptop, open the page on the TV, and it's there. Changes show up on other screens within a few seconds. It's held in memory (as are hidden pictures), so restarting the server clears it.
 
 Spoilers: series stills come from early episodes (specials skipped), and movie chapter images come from the first 60% of the film.
 
