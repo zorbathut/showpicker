@@ -1,47 +1,135 @@
-"use strict";
+import { syncCreate } from "./sync.js";
 
-const $ = (s, el = document) => el.querySelector(s);
-const STORE_KEY = "showpicker.lineup";
-const SLIDE_MS = 6000;
+const OLD_STORE_KEY = "showpicker.lineup"; // where lineups lived before they moved to the server; read once for import
+const POLL_MS = 3000;
+const BOOT_RETRY_MS = 5000;
+const SEARCH_DEBOUNCE_MS = 250;
+const NOTICE_MS = 5000;
+const NOTICE_LONG_MS = 8000;
+const NOTICE_STICKY = 0;
+const SHOW_IDLE_MS = 2000;
+const SHOW_EAGER_IMAGES = 6;
 
 const state = {
-  lineup: [],        // ordered list of title keys ("jf:<id>", "tmdb:movie:<id>")
-  details: {},       // key -> title details (or {error})
-  replaceAt: null,   // index to insert the next pick at ("wrong match" flow)
+  lineup: [], // ordered title keys ("jf:<id>", "tmdb:movie:<id>"), mirrored from the sync module
+  lineupMax: null,
+  details: {}, // key -> title payload, or {error, status}
+  replaceAt: null, // index the next pick goes to (the "wrong match" flow)
+  undo: null, // the lineup before the last Clear, while no other edit has happened since
+  winnerKey: null, // the 🎲 result, highlighted until the next pick
 };
 
 // ------------------------------------------------------------------ utils
 
-const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
-  ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+function $(selector, root = document) {
+  return root.querySelector(selector);
+}
 
-async function api(url) {
-  const r = await fetch(url);
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+}
+
+// A CSS url() for any URL: characters that could end the string or the url() are percent-encoded.
+function cssUrl(url) {
+  return `url("${url.replace(/["'()\\\s]/g, (c) => `%${c.charCodeAt(0).toString(16).padStart(2, "0")}`)}")`;
+}
+
+class ErrorHttp extends Error {
+  constructor(status, message) {
+    super(message);
+    this.status = status;
+  }
+}
+
+async function errorText(r) {
+  if ((r.headers.get("content-type") || "").includes("application/json")) {
+    const body = await r.json();
+    return typeof body.detail === "string" ? body.detail : JSON.stringify(body.detail ?? body);
+  }
+  return `${r.status} ${r.statusText}`;
+}
+
+async function api(url, options) {
+  const r = await fetch(url, options);
   if (!r.ok) {
-    let msg = `${r.status}`;
-    try { msg = (await r.json()).detail || msg; } catch {}
-    throw new Error(msg);
+    throw new ErrorHttp(r.status, await errorText(r));
   }
   return r.json();
 }
 
+function plural(n, word) {
+  return `${n} ${word}${n === 1 ? "" : "s"}`;
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function debounce(fn, ms) {
   let t;
-  return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); };
+  return (...args) => {
+    clearTimeout(t);
+    t = setTimeout(() => fn(...args), ms);
+  };
 }
 
 let noticeTimer;
-function notice(msg, ms = 5000) {
+function notice(msg, ms) {
   const n = $("#notice");
   n.textContent = msg;
   n.hidden = !msg;
   clearTimeout(noticeTimer);
-  if (msg && ms) noticeTimer = setTimeout(() => (n.hidden = true), ms);
+  if (msg && ms) {
+    noticeTimer = setTimeout(() => {
+      n.hidden = true;
+    }, ms);
+  }
 }
 
+// A notice with one action button.
+function noticeAction(msg, label, action) {
+  notice(msg, NOTICE_STICKY);
+  const button = document.createElement("button");
+  button.type = "button";
+  button.textContent = label;
+  button.addEventListener("click", () => {
+    notice("", NOTICE_MS);
+    action();
+  });
+  $("#notice").append(" ", button);
+}
+
+function reportError(e) {
+  console.error(e);
+  notice(`Something went wrong: ${e?.message ?? e}`, NOTICE_LONG_MS);
+}
+
+window.addEventListener("unhandledrejection", (ev) => reportError(ev.reason));
+
+// A broken image hides its cell instead of showing a broken-image icon, and says so in the console.
+document.addEventListener(
+  "error",
+  (ev) => {
+    const img = ev.target;
+    if (!(img instanceof HTMLImageElement) || !img.closest("#grid, #show")) {
+      return;
+    }
+    console.warn("image failed to load:", img.src);
+    if (img.matches(".show-logo")) {
+      showLogoFailed();
+    } else {
+      (img.closest(".show-cell") ?? img).hidden = true;
+    }
+  },
+  true,
+);
+
 function fmtRuntime(min) {
-  if (!min) return null;
-  const h = Math.floor(min / 60), m = min % 60;
+  if (!min) {
+    return null;
+  }
+  const h = Math.floor(min / 60);
+  const m = min % 60;
   return h ? `${h}h${m ? ` ${m}m` : ""}` : `${m}m`;
 }
 
@@ -50,94 +138,262 @@ function metaParts(d) {
   if (d.year) {
     let y = String(d.year);
     if (d.kind === "series") {
-      if (d.end_year && d.end_year !== d.year) y += `–${d.end_year}`;
-      else if (!d.end_year && d.status && d.status !== "Ended") y += "–";
+      if (d.end_year && d.end_year !== d.year) {
+        y += `–${d.end_year}`;
+      } else if (!d.end_year && d.status && d.status !== "Ended") {
+        y += "–";
+      }
     }
     parts.push(y);
   }
-  if (d.kind === "series") parts.push(d.seasons ? `${d.seasons} season${d.seasons > 1 ? "s" : ""}` : "Series");
-  else parts.push("Movie");
+  if (d.kind === "series") {
+    parts.push(d.seasons ? `${d.seasons} season${d.seasons > 1 ? "s" : ""}` : "Series");
+  } else {
+    parts.push("Movie");
+  }
   const rt = fmtRuntime(d.runtime);
-  if (rt) parts.push(d.kind === "series" ? `${rt}/ep` : rt);
-  if (d.certification) parts.push(d.certification);
-  if (d.rating) parts.push(`★ ${d.rating}`);
+  if (rt) {
+    parts.push(d.kind === "series" ? `${rt}/ep` : rt);
+  }
+  if (d.certification) {
+    parts.push(d.certification);
+  }
+  if (d.rating) {
+    parts.push(`★ ${d.rating}`);
+  }
   return parts;
 }
 
-// Images shown under a card / in the slideshow strip.
-const stripOf = (d) => (d.stills.length ? d.stills : d.backdrops.slice(1));
-// Everything the slideshow cycles through.
-const slidesOf = (d) => {
-  const all = [...d.backdrops, ...d.stills].map((p) => p.full);
-  if (!all.length && d.poster) all.push(d.poster);
-  return all;
-};
+// ------------------------------------------------------------------ title details
 
-// ------------------------------------------------------------------ persistence
+const detailsInflight = new Map(); // key -> promise, so concurrent callers share one request
 
-function save() {
-  const h = state.lineup.map((k) => encodeURIComponent(k).replace(/%3A/g, ":")).join(",");
-  history.replaceState(null, "", h ? `#${h}` : location.pathname + location.search);
-  try { localStorage.setItem(STORE_KEY, JSON.stringify(state.lineup)); } catch {}
+function detailsEnsure(key) {
+  const have = state.details[key];
+  if (have && !have.error) {
+    return Promise.resolve(have);
+  }
+  if (!detailsInflight.has(key)) {
+    detailsInflight.set(
+      key,
+      detailsFetch(key).finally(() => detailsInflight.delete(key)),
+    );
+  }
+  return detailsInflight.get(key);
 }
 
-function load() {
-  const h = location.hash.slice(1);
-  if (h) return h.split(",").map(decodeURIComponent).filter(Boolean);
-  try { return JSON.parse(localStorage.getItem(STORE_KEY) || "[]"); } catch { return []; }
-}
-
-// ------------------------------------------------------------------ lineup
-
-async function ensureDetails(key) {
-  if (state.details[key] && !state.details[key].error) return state.details[key];
+async function detailsFetch(key) {
   try {
     state.details[key] = await api(`/api/title/${encodeURIComponent(key)}`);
   } catch (e) {
-    state.details[key] = { key, error: e.message };
+    console.warn(`loading ${key} failed:`, e);
+    state.details[key] = { key, error: e.message, status: e instanceof ErrorHttp ? e.status : null };
   }
   return state.details[key];
 }
 
-async function addKey(key) {
+async function detailsLoadAll() {
+  await Promise.all(
+    state.lineup.map(async (key) => {
+      await detailsEnsure(key);
+      render();
+    }),
+  );
+}
+
+// ------------------------------------------------------------------ lineup
+
+async function lineupTransport(method, body) {
+  const r = await fetch("/api/lineup", method === "GET" ? {} : { method, headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+  const json = (r.headers.get("content-type") || "").includes("application/json") ? await r.json() : null;
+  return { status: r.status, body: json };
+}
+
+const sync = syncCreate(lineupTransport, {
+  onAdopt(keys) {
+    state.lineup = [...keys];
+    state.replaceAt = null;
+    state.undo = null;
+    render();
+    detailsLoadAll().catch(reportError);
+  },
+  onConflict() {
+    notice("The lineup changed on another screen; redo that change if you still want it.", NOTICE_LONG_MS);
+  },
+  onRefused(message) {
+    reportError(new Error(`The server refused that lineup: ${message}`));
+  },
+  onConnection(ok, error) {
+    if (!ok) {
+      console.warn("lost connection to the server:", error);
+    }
+    const status = $("#status");
+    status.textContent = ok ? "" : "Lost connection to the server; retrying…";
+    status.hidden = ok;
+  },
+});
+
+// Resolves true once the new lineup is on the server.
+function lineupSet(keys) {
+  state.lineup = keys;
+  state.undo = null;
+  render();
+  return sync.edit(keys);
+}
+
+function lineupEdit(keys) {
+  lineupSet(keys).catch(reportError);
+}
+
+function lineupAdd(key) {
   const existing = state.lineup.indexOf(key);
   if (existing >= 0) {
     state.replaceAt = null;
-    flashCard(existing);
-    return;
+    cardFlash(existing);
+    return false;
   }
+  if (state.lineup.length >= state.lineupMax) {
+    notice(`Lineup is full (${state.lineupMax}).`, NOTICE_MS);
+    return false;
+  }
+  const keys = [...state.lineup];
   if (state.replaceAt != null) {
-    state.lineup.splice(Math.min(state.replaceAt, state.lineup.length), 0, key);
+    keys.splice(Math.min(state.replaceAt, keys.length), 0, key);
     state.replaceAt = null;
   } else {
-    state.lineup.push(key);
+    keys.push(key);
   }
-  save();
-  render();
-  await ensureDetails(key);
-  render();
+  lineupEdit(keys);
+  const load = async () => {
+    await detailsEnsure(key);
+    render();
+  };
+  load().catch(reportError);
+  return true;
 }
 
-function removeAt(i) {
-  state.lineup.splice(i, 1);
-  save();
-  render();
+function lineupRemove(i) {
+  lineupEdit(state.lineup.filter((_, j) => j !== i));
 }
 
-function move(i, delta) {
+function lineupMove(i, delta) {
   const j = i + delta;
-  if (j < 0 || j >= state.lineup.length) return;
-  [state.lineup[i], state.lineup[j]] = [state.lineup[j], state.lineup[i]];
-  save();
-  render();
+  if (j < 0 || j >= state.lineup.length) {
+    return;
+  }
+  const keys = [...state.lineup];
+  [keys[i], keys[j]] = [keys[j], keys[i]];
+  lineupEdit(keys);
 }
 
-function flashCard(i) {
+async function lineupAddBulk(lines) {
+  const missed = [];
+  let added = 0;
+  let stoppedAt = null;
+  for (const [n, line] of lines.entries()) {
+    if (state.lineup.length >= state.lineupMax) {
+      stoppedAt = line;
+      break;
+    }
+    notice(`Adding ${n + 1}/${lines.length}: ${line}`, NOTICE_STICKY);
+    try {
+      const results = await search(line);
+      if (results.length) {
+        added += lineupAdd(results[0].key) ? 1 : 0;
+      } else {
+        missed.push(line);
+      }
+    } catch (e) {
+      console.warn(`bulk add: searching “${line}” failed:`, e);
+      missed.push(`${line} (${e.message})`);
+    }
+  }
+  const parts = [`Added ${added}.`];
+  if (missed.length) {
+    parts.push(`No match for: ${missed.join(", ")}.`);
+  }
+  if (stoppedAt) {
+    parts.push(`Lineup is full (${state.lineupMax}); stopped before “${stoppedAt}”.`);
+  }
+  if (!missed.length && !stoppedAt) {
+    parts.push("Use ↺ on a card if a match is wrong.");
+  }
+  notice(parts.join(" "), NOTICE_LONG_MS);
+}
+
+// Lineups used to live in the URL hash and in localStorage (keys joined by commas, each URI-encoded). Bring an old one over if the server has none, and only forget it once it's safely on the server.
+async function lineupImportOld() {
+  const hash = location.hash.slice(1);
+  let fromHash = [];
+  if (hash) {
+    try {
+      fromHash = hash.split(",").map(decodeURIComponent).filter(Boolean);
+    } catch (e) {
+      console.warn("ignoring an unreadable old link:", hash, e);
+    }
+  }
+  let fromStore = [];
+  try {
+    fromStore = JSON.parse(localStorage.getItem(OLD_STORE_KEY) || "[]");
+  } catch (e) {
+    console.warn("couldn't read the old saved lineup:", e);
+  }
+  const forget = () => {
+    try {
+      localStorage.removeItem(OLD_STORE_KEY);
+    } catch (e) {
+      console.warn("couldn't clear the old saved lineup:", e);
+    }
+    if (hash) {
+      history.replaceState(null, "", location.pathname + location.search);
+    }
+  };
+  const keys = [...new Set(fromHash.length ? fromHash : fromStore)];
+  if (!keys.length) {
+    forget();
+    return;
+  }
+  if (state.lineup.length) {
+    forget();
+    if (fromHash.length) {
+      noticeAction(`This link has an old saved lineup (${plural(keys.length, "title")}), but there's already a lineup in use.`, "Replace it", () =>
+        lineupImport(keys, () => {}).catch(reportError),
+      );
+    } else {
+      console.info("ignoring the old saved lineup because the server already has one:", keys);
+    }
+    return;
+  }
+  await lineupImport(keys, forget);
+}
+
+async function lineupImport(keys, onSaved) {
+  // The server is the judge of which keys are still good, and their details are needed anyway. Keep keys that fail transiently.
+  const details = await Promise.all(keys.map(detailsEnsure));
+  const usable = keys.filter((_, i) => !details[i].error || !details[i].status || details[i].status >= 500);
+  const dropped = keys.filter((k) => !usable.includes(k));
+  const kept = usable.slice(0, state.lineupMax);
+  if (await lineupSet(kept)) {
+    onSaved();
+  }
+  const parts = [`Imported ${plural(kept.length, "title")} from an old saved lineup.`];
+  if (dropped.length) {
+    parts.push(`Skipped ${dropped.length} that no longer resolve: ${dropped.join(", ")}.`);
+  }
+  if (usable.length > kept.length) {
+    parts.push(`Only the first ${state.lineupMax} fit.`);
+  }
+  notice(parts.join(" "), NOTICE_LONG_MS);
+}
+
+function cardFlash(i) {
   const el = $(`#grid .card[data-i="${i}"]`);
-  if (!el) return;
+  if (!el) {
+    return;
+  }
   el.scrollIntoView({ behavior: "smooth", block: "center" });
   el.classList.remove("flash");
-  void el.offsetWidth;
+  void el.offsetWidth; // restart the animation
   el.classList.add("flash");
 }
 
@@ -147,34 +403,37 @@ function cardHtml(key, i) {
   const d = state.details[key];
   const actions = `
     <div class="actions">
-      <button data-act="left" title="Move left">◀</button>
-      <button data-act="right" title="Move right">▶</button>
-      <button data-act="redo" title="Wrong match? Search again">↺</button>
-      <button data-act="remove" title="Remove">✕</button>
+      <button type="button" data-act="left" title="Move left">◀</button>
+      <button type="button" data-act="right" title="Move right">▶</button>
+      <button type="button" data-act="redo" title="Wrong match? Search again">↺</button>
+      <button type="button" data-act="remove" title="Remove">✕</button>
     </div>`;
+  const attrs = `data-i="${i}" data-key="${esc(key)}"`;
   if (!d) {
-    return `<article class="card loading" data-i="${i}"><div class="hero"></div>
+    return `<article class="card loading" ${attrs}><div class="hero"></div>
       <div class="body"><div class="meta">Loading…</div></div>${actions}</article>`;
   }
   if (d.error) {
-    return `<article class="card" data-i="${i}"><div class="hero"><h2 class="logo-text">?</h2></div>
+    return `<article class="card" ${attrs}><div class="hero"><h2 class="logo-text">?</h2></div>
       <div class="body"><div class="meta">Couldn't load <code>${esc(key)}</code>: ${esc(d.error)}</div></div>${actions}</article>`;
   }
-  const hero = d.backdrops[0]?.full || d.poster;
-  const strip = stripOf(d).slice(0, 4);
+  const hero = d.gallery[0]?.full || d.poster;
+  const strip = d.gallery.slice(1, 5);
   return `
-    <article class="card" data-i="${i}">
-      <div class="hero" data-act="show" data-img="0" ${hero ? `style="background-image:url('${esc(hero)}')"` : ""}>
-        ${d.logo ? `<img class="logo" src="${esc(d.logo)}" alt="${esc(d.title)}">`
-                 : `<h2 class="logo-text">${esc(d.title)}</h2>`}
+    <article class="card${key === state.winnerKey ? " winner" : ""}" ${attrs}>
+      <div class="hero" data-act="show" data-img="0" ${hero ? `style="background-image:${esc(cssUrl(hero))}"` : ""}>
+        ${d.logo ? `<img class="logo" src="${esc(d.logo)}" alt="${esc(d.title)}">` : `<h2 class="logo-text">${esc(d.title)}</h2>`}
         ${d.source === "jellyfin" ? `<span class="badge">In library</span>` : ""}
       </div>
       <div class="body">
         <div class="meta">${d.logo ? `<b>${esc(d.title)}</b> · ` : ""}${metaParts(d).map(esc).join(" · ")}</div>
         ${d.genres.length ? `<div class="genres">${d.genres.slice(0, 4).map(esc).join(" · ")}</div>` : ""}
         ${d.overview ? `<p class="overview">${esc(d.overview)}</p>` : ""}
-        ${strip.length ? `<div class="stills">${strip.map((p) =>
-          `<img loading="lazy" src="${esc(p.thumb)}" alt="" data-act="show" data-img="${slidesOf(d).indexOf(p.full)}">`).join("")}</div>` : ""}
+        ${
+          strip.length
+            ? `<div class="stills">${strip.map((p, n) => `<img loading="lazy" src="${esc(p.thumb)}" alt="" data-act="show" data-img="${n + 1}">`).join("")}</div>`
+            : ""
+        }
       </div>
       ${actions}
     </article>`;
@@ -183,26 +442,36 @@ function cardHtml(key, i) {
 function render() {
   $("#grid").innerHTML = state.lineup.map(cardHtml).join("");
   $("#empty").hidden = state.lineup.length > 0;
-  if (!$("#show").hidden) paintShow(false);
+  showPaint();
 }
 
 $("#grid").addEventListener("click", (ev) => {
   const t = ev.target.closest("[data-act]");
   const card = ev.target.closest(".card");
-  if (!t || !card) return;
-  const i = +card.dataset.i;
+  if (!t || !card) {
+    return;
+  }
+  const i = Number(card.dataset.i);
   switch (t.dataset.act) {
-    case "remove": removeAt(i); break;
-    case "left": move(i, -1); break;
-    case "right": move(i, 1); break;
-    case "show": openShow(i, Math.max(0, +t.dataset.img || 0)); break;
+    case "remove":
+      lineupRemove(i);
+      break;
+    case "left":
+      lineupMove(i, -1);
+      break;
+    case "right":
+      lineupMove(i, 1);
+      break;
+    case "show":
+      showOpen(card.dataset.key, Number(t.dataset.img));
+      break;
     case "redo": {
       const d = state.details[state.lineup[i]];
-      removeAt(i);
+      lineupRemove(i);
       state.replaceAt = i;
       q.value = d?.title || "";
       q.focus();
-      runSearch();
+      searchRun().catch(reportError);
       break;
     }
   }
@@ -218,309 +487,414 @@ let sel = -1;
 
 async function search(text) {
   const res = await api(`/api/search?q=${encodeURIComponent(text)}`);
-  if (res.errors?.length) notice(res.errors.join(" / "));
+  if (res.errors.length) {
+    notice(res.errors.join(" / "), NOTICE_MS);
+  }
   return res.results;
 }
 
-async function runSearch() {
+async function searchRun() {
   const text = q.value.trim();
   const seq = ++searchSeq;
-  if (!text) { hideSuggest(); return; }
+  if (!text) {
+    suggestHide();
+    return;
+  }
   try {
     const results = await search(text);
-    if (seq !== searchSeq) return;
+    // Expected race: the user kept typing and a newer search superseded this one.
+    if (seq !== searchSeq) {
+      return;
+    }
     lastResults = { text, results };
     sel = results.length ? 0 : -1;
-    renderSuggest();
+    suggestRender();
   } catch (e) {
-    if (seq === searchSeq) notice(`Search failed: ${e.message}`);
+    if (seq === searchSeq) {
+      reportError(e);
+    }
   }
 }
 
-function renderSuggest() {
+async function searchEnter() {
+  const text = q.value.trim();
+  if (!text) {
+    return;
+  }
+  if (lastResults.text !== text) {
+    // The debounced search hasn't caught up with what was typed; search now.
+    ++searchSeq;
+    lastResults = { text, results: await search(text) };
+    sel = 0;
+  }
+  if (lastResults.results.length) {
+    suggestChoose(Math.max(sel, 0));
+  } else {
+    suggestRender();
+    notice(`No match for “${text}”`, NOTICE_MS);
+  }
+}
+
+function suggestRender() {
   const { results } = lastResults;
   if (!results.length) {
     sug.innerHTML = `<li class="none">No matches</li>`;
   } else {
-    sug.innerHTML = results.map((r, i) => `
+    sug.innerHTML = results
+      .map(
+        (r, i) => `
       <li data-i="${i}" class="${i === sel ? "sel" : ""}">
         ${r.poster ? `<img src="${esc(r.poster)}" alt="">` : `<span class="noposter"></span>`}
         <span class="t">${esc(r.title)}</span>
         <span class="y">${esc(r.year ?? "")} · ${r.kind === "series" ? "Series" : "Movie"}</span>
         <span class="src ${r.source}">${r.source === "jellyfin" ? "Library" : "TMDB"}</span>
-      </li>`).join("");
+      </li>`,
+      )
+      .join("");
   }
   sug.hidden = false;
 }
 
-function hideSuggest() {
+function suggestHide() {
   sug.hidden = true;
   sel = -1;
 }
 
-function choose(i) {
+function suggestChoose(i) {
   const r = lastResults.results[i];
-  if (!r) return;
+  if (!r) {
+    return;
+  }
   q.value = "";
-  hideSuggest();
-  addKey(r.key);
+  suggestHide();
+  lineupAdd(r.key);
 }
 
-q.addEventListener("input", debounce(runSearch, 250));
+q.addEventListener(
+  "input",
+  debounce(() => searchRun().catch(reportError), SEARCH_DEBOUNCE_MS),
+);
 
-q.addEventListener("keydown", async (ev) => {
+q.addEventListener("keydown", (ev) => {
   const n = lastResults.results.length;
   if (ev.key === "ArrowDown" && !sug.hidden && n) {
-    ev.preventDefault(); sel = (sel + 1) % n; renderSuggest();
+    ev.preventDefault();
+    sel = (sel + 1) % n;
+    suggestRender();
   } else if (ev.key === "ArrowUp" && !sug.hidden && n) {
-    ev.preventDefault(); sel = (sel - 1 + n) % n; renderSuggest();
+    ev.preventDefault();
+    sel = (sel - 1 + n) % n;
+    suggestRender();
   } else if (ev.key === "Escape") {
-    hideSuggest();
+    suggestHide();
     state.replaceAt = null;
   } else if (ev.key === "Enter") {
     ev.preventDefault();
-    const text = q.value.trim();
-    if (!text) return;
-    if (lastResults.text !== text) {      // debounce hasn't caught up; search now
-      ++searchSeq;
-      try { lastResults = { text, results: await search(text) }; } catch (e) { notice(`Search failed: ${e.message}`); return; }
-      sel = 0;
-    }
-    if (lastResults.results.length) choose(Math.max(sel, 0));
-    else { renderSuggest(); notice(`No match for “${text}”`); }
+    searchEnter().catch(reportError);
   }
 });
 
 sug.addEventListener("mousedown", (ev) => {
   const li = ev.target.closest("li[data-i]");
-  if (li) { ev.preventDefault(); choose(+li.dataset.i); }
+  if (li) {
+    ev.preventDefault();
+    suggestChoose(Number(li.dataset.i));
+  }
 });
 
-q.addEventListener("blur", () => setTimeout(hideSuggest, 150));
-q.addEventListener("focus", () => { if (q.value.trim() && lastResults.text === q.value.trim()) renderSuggest(); });
+q.addEventListener("blur", () => setTimeout(suggestHide, 150));
+q.addEventListener("focus", () => {
+  if (q.value.trim() && lastResults.text === q.value.trim()) {
+    suggestRender();
+  }
+});
 
 // Paste a list (one title per line) to add them all, taking the top match for each.
 q.addEventListener("paste", (ev) => {
-  const text = ev.clipboardData?.getData("text") || "";
-  const lines = text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
-  if (lines.length < 2) return;
+  const lines = (ev.clipboardData?.getData("text") || "")
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter(Boolean);
+  if (lines.length < 2) {
+    return;
+  }
   ev.preventDefault();
-  bulkAdd(lines);
+  lineupAddBulk(lines).catch(reportError);
 });
 
-async function bulkAdd(lines) {
-  const missed = [];
-  for (const [n, line] of lines.entries()) {
-    notice(`Adding ${n + 1}/${lines.length}: ${line}`, 0);
-    try {
-      const results = await search(line);
-      if (results.length) await addKey(results[0].key);
-      else missed.push(line);
-    } catch {
-      missed.push(line);
-    }
-  }
-  notice(missed.length ? `No match for: ${missed.join(", ")}` : `Added ${lines.length} titles. Use ↺ on a card if a match is wrong.`, 8000);
-}
-
-// ------------------------------------------------------------------ presentation mode
+// ------------------------------------------------------------------ present mode
 
 const show = $("#show");
-const slides = show.querySelectorAll(".slide");
-const ss = { i: 0, img: 0, front: 0, timer: null, paused: false, token: 0 };
+const showScroll = $(".show-scroll", show);
+const showGallery = $(".show-gallery", show);
+// `key` is the title being presented; its index is derived from the lineup on every paint, so edits elsewhere never move the presentation to a different title. `painted` is what the gallery DOM currently shows: it's rebuilt only when the title or its details change, so unrelated re-renders don't reset the scroll position.
+const showState = { key: null, i: 0, painted: null, idleTimer: null };
 
-function openShow(i = 0, img = 0) {
-  if (!state.lineup.length) { notice("Add some titles first."); return; }
-  ss.i = Math.min(i, state.lineup.length - 1);
-  ss.img = img;
-  ss.paused = false;
+function showIsOpen() {
+  return !show.hidden;
+}
+
+function showOpen(key, imageIndex) {
+  if (!state.lineup.length) {
+    notice("Add some titles first.", NOTICE_MS);
+    return;
+  }
+  showState.key = key;
+  showState.painted = null;
   show.hidden = false;
   document.body.classList.add("showing");
-  show.requestFullscreen?.().catch(() => {});
-  paintShow(true);
+  showScroll.focus({ preventScroll: true });
+  showWake();
+  if (show.requestFullscreen) {
+    show.requestFullscreen().catch((e) => console.info("fullscreen unavailable; presenting in the window instead:", e.message));
+  }
+  showPaint();
+  if (imageIndex > 0) {
+    showGallery.children[imageIndex]?.scrollIntoView({ block: "start" });
+  }
 }
 
-function closeShow() {
+function showClose() {
   show.hidden = true;
   document.body.classList.remove("showing");
-  clearInterval(ss.timer);
-  if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
-}
-
-function currentShowDetails() {
-  return state.details[state.lineup[ss.i]];
-}
-
-function paintShow(newTitle) {
-  if (!state.lineup.length) { closeShow(); return; }
-  ss.i = Math.min(ss.i, state.lineup.length - 1);
-  const key = state.lineup[ss.i];
-  const d = currentShowDetails();
-  $(".counter", show).textContent = `${ss.i + 1} / ${state.lineup.length}${ss.paused ? " · paused" : ""}`;
-  if (!d) { ensureDetails(key).then(() => paintShow(true)); return; }
-  if (!newTitle) return;
-
-  const logo = $(".logo", show), text = $(".logo-text", show);
-  if (d.logo) {
-    logo.src = d.logo; logo.alt = d.title || ""; logo.hidden = false; text.hidden = true;
-  } else {
-    logo.hidden = true; logo.removeAttribute("src"); text.hidden = false; text.textContent = d.title || key;
+  if (document.fullscreenElement) {
+    document.exitFullscreen().catch((e) => console.warn("leaving fullscreen failed:", e));
   }
-  $(".meta", show).textContent = d.error ? d.error :
-    [...metaParts(d), ...(d.genres.length ? [d.genres.slice(0, 3).join(", ")] : [])].join("  ·  ");
-  $(".tagline", show).textContent = d.tagline || "";
-
-  const all = d.error ? [] : slidesOf(d);
-  $(".strip", show).innerHTML = all.map((u, n) => {
-    const p = [...d.backdrops, ...d.stills].find((x) => x.full === u);
-    return `<img src="${esc(p ? p.thumb : u)}" data-n="${n}" alt="">`;
-  }).join("");
-  ss.img = all.length ? ss.img % all.length : 0;
-  setSlide();
-  restartTimer();
-
-  // Warm up the next title so arrowing forward is instant.
-  const nextKey = state.lineup[(ss.i + 1) % state.lineup.length];
-  ensureDetails(nextKey).then((nd) => { if (!nd.error) { const u = slidesOf(nd)[0]; if (u) new Image().src = u; } });
 }
 
-function setSlide() {
-  const d = currentShowDetails();
-  const all = d && !d.error ? slidesOf(d) : [];
-  show.querySelectorAll(".strip img").forEach((im) => im.classList.toggle("on", +im.dataset.n === ss.img));
-  const url = all[ss.img];
-  const token = ++ss.token;
-  if (!url) { slides.forEach((s) => s.classList.remove("on")); return; }
-  const im = new Image();
-  im.onload = im.onerror = () => {
-    if (token !== ss.token) return;            // user already moved on
-    const back = slides[1 - ss.front];
-    back.style.backgroundImage = `url('${url.replace(/'/g, "%27")}')`;
-    back.classList.add("on");
-    slides[ss.front].classList.remove("on");
-    ss.front = 1 - ss.front;
-    if (all.length > 1) new Image().src = all[(ss.img + 1) % all.length];
-  };
-  im.src = url;
+function showColumns(n) {
+  if (n <= 2) {
+    return Math.max(n, 1);
+  }
+  return n <= 4 ? 2 : 3;
 }
 
-function stepImage(delta) {
-  const d = currentShowDetails();
-  const n = d && !d.error ? slidesOf(d).length : 0;
-  if (n < 2) return;
-  ss.img = (ss.img + delta + n) % n;
-  setSlide();
-  restartTimer();
-}
-
-function stepTitle(delta) {
+function showPaint() {
+  if (!showIsOpen()) {
+    return;
+  }
   const n = state.lineup.length;
-  ss.i = (ss.i + delta + n) % n;
-  ss.img = 0;
-  paintShow(true);
+  const found = state.lineup.indexOf(showState.key);
+  // The presented title was removed elsewhere: stay at the same position in the lineup.
+  showState.i = found >= 0 ? found : Math.min(showState.i, n - 1);
+  showState.key = n ? state.lineup[showState.i] : null;
+  $(".show-counter", show).textContent = n ? `${showState.i + 1} / ${n}` : "";
+
+  const key = showState.key;
+  const d = key ? state.details[key] : null;
+  if (showState.painted && showState.painted.key === key && showState.painted.d === d) {
+    return;
+  }
+  showState.painted = { key, d };
+  showScroll.scrollTop = 0;
+
+  const logo = $(".show-logo", show);
+  const name = $(".show-name", show);
+  logo.hidden = !d?.logo;
+  name.hidden = Boolean(d?.logo);
+  if (d?.logo) {
+    logo.src = d.logo;
+    logo.alt = d.title || "";
+  } else {
+    logo.removeAttribute("src");
+    name.textContent = !key ? "The lineup is empty" : d?.title || (d ? key : "Loading…");
+  }
+  $(".show-meta", show).textContent = !d
+    ? ""
+    : d.error
+      ? `Couldn't load: ${d.error}`
+      : [...metaParts(d), ...(d.genres.length ? [d.genres.slice(0, 3).join(", ")] : [])].join("  ·  ");
+  $(".show-tagline", show).textContent = d?.tagline || "";
+
+  const gallery = d && !d.error ? d.gallery : [];
+  const posterOnly = !gallery.length && d?.poster;
+  const cells = posterOnly ? [{ full: d.poster }] : gallery;
+  const cols = showColumns(cells.length);
+  show.style.setProperty("--cols", cols);
+  show.style.setProperty("--fit-rows", Math.min(2, Math.max(1, Math.ceil(cells.length / cols))));
+  showGallery.classList.toggle("poster-only", Boolean(posterOnly));
+  showGallery.innerHTML = cells
+    .map((p, i) => `<div class="show-cell"><img src="${esc(p.full)}" alt="" ${i >= SHOW_EAGER_IMAGES ? 'loading="lazy"' : ""}></div>`)
+    .join("");
+  $(".show-bg", show).style.backgroundImage = gallery[0] ? cssUrl(gallery[0].thumb) : "";
+
+  if (key && !d) {
+    showLoad(key).catch(reportError);
+  } else if (d) {
+    showPrefetchNext().catch(reportError);
+  }
 }
 
-function restartTimer() {
-  clearInterval(ss.timer);
-  if (!ss.paused) ss.timer = setInterval(() => stepImage(1), SLIDE_MS);
+function showLogoFailed() {
+  $(".show-logo", show).hidden = true;
+  const name = $(".show-name", show);
+  name.hidden = false;
+  name.textContent = showState.painted?.d?.title || "";
 }
 
-function togglePause() {
-  ss.paused = !ss.paused;
-  restartTimer();
-  paintShow(false);
+async function showLoad(key) {
+  await detailsEnsure(key);
+  showPaint();
 }
+
+// Warm up the next title so stepping forward is instant.
+async function showPrefetchNext() {
+  const nextKey = state.lineup[(showState.i + 1) % state.lineup.length];
+  const next = await detailsEnsure(nextKey);
+  if (!next.error) {
+    for (const p of next.gallery.slice(0, SHOW_EAGER_IMAGES)) {
+      new Image().src = p.full;
+    }
+  }
+}
+
+function showStepTitle(delta) {
+  const n = state.lineup.length;
+  if (!n) {
+    return;
+  }
+  showState.key = state.lineup[(showState.i + delta + n) % n];
+  showPaint();
+}
+
+function showStepRow(delta) {
+  const cell = showGallery.firstElementChild;
+  const gap = Number.parseFloat(getComputedStyle(showGallery).rowGap) || 0;
+  const step = cell ? cell.offsetHeight + gap : showScroll.clientHeight / 2;
+  showScroll.scrollBy({ top: delta * step, behavior: "smooth" });
+}
+
+// Controls and cursor appear on mouse movement (or a touch) and fade after a moment, so they don't sit over the images on a TV.
+function showWake() {
+  show.classList.add("awake");
+  clearTimeout(showState.idleTimer);
+  showState.idleTimer = setTimeout(() => show.classList.remove("awake"), SHOW_IDLE_MS);
+}
+
+show.addEventListener("mousemove", showWake);
+show.addEventListener("pointerdown", showWake, true);
 
 document.addEventListener("keydown", (ev) => {
-  if (show.hidden) return;
+  if (!showIsOpen() || ev.altKey || ev.ctrlKey || ev.metaKey) {
+    return;
+  }
   const k = ev.key;
-  if (k === "ArrowRight" || k === "PageDown" || k === "n") stepTitle(1);
-  else if (k === "ArrowLeft" || k === "PageUp" || k === "p") stepTitle(-1);
-  else if (k === "ArrowDown") stepImage(1);
-  else if (k === "ArrowUp") stepImage(-1);
-  else if (k === " ") togglePause();
-  else if (k === "Escape") closeShow();
-  else return;
+  if (k === "ArrowRight" || k === "PageDown" || k === "n") {
+    showStepTitle(1);
+  } else if (k === "ArrowLeft" || k === "PageUp" || k === "p") {
+    showStepTitle(-1);
+  } else if (k === "ArrowDown") {
+    showStepRow(1);
+  } else if (k === "ArrowUp") {
+    showStepRow(-1);
+  } else if (k === "Escape") {
+    showClose();
+  } else {
+    return;
+  }
   ev.preventDefault();
 });
 
-show.addEventListener("click", (ev) => {
-  if (ev.target.closest(".close")) { closeShow(); return; }
-  const thumb = ev.target.closest(".strip img");
-  if (thumb) { ss.img = +thumb.dataset.n; setSlide(); restartTimer(); return; }
-  // Click left/right third to change title, middle to pause.
-  const x = ev.clientX / window.innerWidth;
-  if (x < 0.33) stepTitle(-1);
-  else if (x > 0.67) stepTitle(1);
-  else togglePause();
-});
+$(".show-prev", show).addEventListener("click", () => showStepTitle(-1));
+$(".show-next", show).addEventListener("click", () => showStepTitle(1));
+$(".show-close", show).addEventListener("click", showClose);
 
 document.addEventListener("fullscreenchange", () => {
-  if (!document.fullscreenElement && !show.hidden) closeShow();
+  // Esc in fullscreen leaves fullscreen without a keydown reaching us; treat that as leaving the presentation.
+  if (!document.fullscreenElement && showIsOpen()) {
+    showClose();
+  }
 });
 
 // ------------------------------------------------------------------ toolbar
 
-$("#present").addEventListener("click", () => openShow(0, 0));
+$("#present").addEventListener("click", () => showOpen(state.lineup[0], 0));
 
 $("#clear").addEventListener("click", () => {
-  if (!state.lineup.length) return;
+  if (!state.lineup.length) {
+    return;
+  }
   const prev = [...state.lineup];
-  state.lineup = [];
-  save();
-  render();
-  notice("Cleared.", 6000);
-  const n = $("#notice");
-  n.innerHTML = `Cleared. <button id="undo">Undo</button>`;
-  $("#undo").onclick = () => { state.lineup = prev; save(); render(); notice(""); };
+  lineupEdit([]);
+  state.undo = prev;
+  noticeAction("Cleared.", "Undo", () => {
+    if (!state.undo) {
+      notice("Can't undo: the lineup has changed since.", NOTICE_MS);
+      return;
+    }
+    lineupEdit(state.undo);
+    detailsLoadAll().catch(reportError);
+  });
 });
 
-$("#share").addEventListener("click", async () => {
+let pickRunning = false;
+
+async function pickRun() {
+  const keys = [...state.lineup];
+  if (keys.length < 2 || pickRunning) {
+    if (keys.length < 2) {
+      notice("Add at least two titles.", NOTICE_MS);
+    }
+    return;
+  }
+  pickRunning = true;
+  $("#pick").disabled = true;
   try {
-    await navigator.clipboard.writeText(location.href);
-    notice("Link copied.");
-  } catch {
-    notice(location.href, 15000);
+    const winner = Math.floor(Math.random() * keys.length);
+    const hops = keys.length * 3 + winner; // a few laps, then land on the winner
+    state.winnerKey = null;
+    for (let h = 0; h <= hops; h++) {
+      for (const c of document.querySelectorAll(".card")) {
+        c.classList.toggle("lit", c.dataset.key === keys[h % keys.length]);
+      }
+      await sleep(60 + 260 * (h / hops) ** 3);
+    }
+    state.winnerKey = keys[winner];
+  } finally {
+    pickRunning = false;
+    $("#pick").disabled = false;
+    render();
   }
-});
-
-$("#pick").addEventListener("click", async () => {
-  const n = state.lineup.length;
-  if (n < 2) { notice("Add at least two titles."); return; }
-  const btn = $("#pick");
-  btn.disabled = true;
-  const winner = Math.floor(Math.random() * n);
-  const hops = n * 3 + winner;     // a few laps, then land on winner
-  document.querySelectorAll(".card.winner").forEach((c) => c.classList.remove("winner"));
-  for (let h = 0; h <= hops; h++) {
-    document.querySelectorAll(".card").forEach((c) => c.classList.toggle("lit", +c.dataset.i === h % n));
-    await new Promise((r) => setTimeout(r, 60 + 260 * (h / hops) ** 3));
+  const i = state.lineup.indexOf(state.winnerKey);
+  if (i >= 0) {
+    $(`#grid .card[data-i="${i}"]`).scrollIntoView({ behavior: "smooth", block: "center" });
   }
-  document.querySelectorAll(".card").forEach((c) => c.classList.remove("lit"));
-  const card = $(`#grid .card[data-i="${winner}"]`);
-  card?.classList.add("winner");
-  card?.scrollIntoView({ behavior: "smooth", block: "center" });
-  btn.disabled = false;
-});
+}
 
-window.addEventListener("hashchange", () => {
-  const keys = load();
-  if (keys.join(",") === state.lineup.join(",")) return;
-  state.lineup = keys;
-  render();
-  keys.forEach((k) => ensureDetails(k).then(render));
-});
+$("#pick").addEventListener("click", () => pickRun().catch(reportError));
 
 // ------------------------------------------------------------------ boot
 
-(async function boot() {
-  try {
-    const cfg = await api("/api/config");
-    if (!cfg.jellyfin && !cfg.tmdb) notice("No data source configured — set JELLYFIN_URL/JELLYFIN_API_KEY and/or TMDB_API_KEY.", 0);
-    else if (!cfg.tmdb) q.placeholder = "Add something from your library… (paste a list, one per line)";
-  } catch {}
-  state.lineup = load();
-  save();
+async function boot() {
+  for (;;) {
+    try {
+      const config = await api("/api/config");
+      state.lineupMax = config.lineup_max;
+      if (!config.tmdb) {
+        q.placeholder = "Add something from your library… (paste a list, one per line)";
+      }
+      const server = await api("/api/lineup");
+      sync.start(server);
+      state.lineup = [...server.keys];
+      break;
+    } catch (e) {
+      reportError(e);
+      await sleep(BOOT_RETRY_MS);
+    }
+  }
   render();
-  await Promise.all(state.lineup.map((k) => ensureDetails(k).then(render)));
-})();
+  setInterval(() => {
+    if (!document.hidden) {
+      sync.poll().catch(reportError);
+    }
+  }, POLL_MS);
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) {
+      sync.poll().catch(reportError);
+    }
+  });
+  await lineupImportOld();
+  await detailsLoadAll();
+}
+
+boot().catch(reportError);

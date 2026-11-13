@@ -1,0 +1,16 @@
+{
+  "$schema": "https://biomejs.dev/schemas/2.6.4/schema.json",
+  "files": { "includes": ["app/static/**", "tests/js/**"] },
+  "formatter": { "indentStyle": "space", "indentWidth": 2, "lineWidth": 160 },
+  "linter": {
+    "rules": {
+      "preset": "recommended",
+      "style": {
+        "useBlockStatements": "error",
+        // Flags unrelated selectors that can never match the same element (e.g. `#suggest img` vs `.stills img`); ordering by specificity would scatter related rules.
+        "noDescendingSpecificity": "off"
+      },
+      "nursery": { "noFloatingPromises": "error" }
+    }
+  }
+}

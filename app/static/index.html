@@ -15,32 +15,34 @@
       <ul id="suggest" hidden></ul>
     </div>
     <div class="tools">
-      <button id="present" title="Fullscreen slideshow (←/→ titles, ↑/↓ images, Space pause, Esc exit)">▶ Present</button>
-      <button id="pick" title="Let fate decide">🎲 Pick one</button>
-      <button id="share" title="Copy a link to this lineup">🔗 Link</button>
-      <button id="clear" title="Remove everything">Clear</button>
+      <button id="present" type="button" title="Fullscreen gallery (←/→ titles, ↑/↓ scroll, Esc exit)">▶ Present</button>
+      <button id="pick" type="button" title="Let fate decide">🎲 Pick one</button>
+      <button id="clear" type="button" title="Remove everything">Clear</button>
     </div>
   </header>
 
+  <div id="status" hidden></div>
   <div id="notice" hidden></div>
   <main id="grid"></main>
   <p id="empty" hidden>Type a title above to start a lineup.</p>
 
   <div id="show" hidden>
-    <div class="slide"></div>
-    <div class="slide"></div>
-    <div class="shade"></div>
-    <div class="info">
-      <img class="logo" alt="">
-      <h2 class="logo-text"></h2>
-      <div class="meta"></div>
-      <p class="tagline"></p>
+    <div class="show-bg"></div>
+    <div class="show-scroll" tabindex="-1">
+      <header class="show-band">
+        <img class="show-logo" alt="">
+        <h2 class="show-name">Title</h2>
+        <div class="show-meta"></div>
+        <p class="show-tagline"></p>
+      </header>
+      <div class="show-gallery"></div>
     </div>
-    <div class="counter"></div>
-    <div class="strip"></div>
-    <button class="close" title="Exit (Esc)">✕</button>
+    <div class="show-counter"></div>
+    <button class="show-prev" type="button" title="Previous title (←)">◀</button>
+    <button class="show-next" type="button" title="Next title (→)">▶</button>
+    <button class="show-close" type="button" title="Exit (Esc)">✕</button>
   </div>
 
-  <script src="/static/app.js"></script>
+  <script type="module" src="/static/app.js"></script>
 </body>
 </html>
