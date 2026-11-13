@@ -159,9 +159,6 @@ function metaParts(d) {
   if (d.certification) {
     parts.push(d.certification);
   }
-  if (d.rating) {
-    parts.push(`★ ${d.rating}`);
-  }
   return parts;
 }
 

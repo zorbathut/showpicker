@@ -108,7 +108,6 @@ class Tmdb:
                 tagline=data.get("tagline") or None,
                 overview=data.get("overview"),
                 genres=[g["name"] for g in data.get("genres") or []],
-                rating=round(data["vote_average"], 1) if data.get("vote_average") else None,
                 runtime=runtime,
                 seasons=data.get("number_of_seasons") if series else None,
                 logo=logo,

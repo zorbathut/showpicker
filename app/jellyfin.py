@@ -93,7 +93,7 @@ class Jellyfin:
     async def details(self, item_id: str) -> TitleDraft | None:
         """None when the item doesn't exist."""
         uid = await self.user()
-        fields = "Overview,Genres,ProductionYear,Chapters,OfficialRating,CommunityRating,RunTimeTicks,Taglines,ChildCount,ProviderIds,Status,EndDate"
+        fields = "Overview,Genres,ProductionYear,Chapters,OfficialRating,RunTimeTicks,Taglines,ChildCount,ProviderIds,Status,EndDate"
         data = await self.get("/Items", {"userId": uid, "ids": item_id, "Fields": fields})
         if not data["Items"]:
             return None
@@ -129,7 +129,6 @@ class Jellyfin:
                 tagline=(it.get("Taglines") or [None])[0],
                 overview=it.get("Overview"),
                 genres=it.get("Genres") or [],
-                rating=round(it["CommunityRating"], 1) if it.get("CommunityRating") else None,
                 certification=it.get("OfficialRating"),
                 runtime=round(it["RunTimeTicks"] / TICKS_PER_MINUTE) if it.get("RunTimeTicks") else None,
                 seasons=it.get("ChildCount") if series else None,

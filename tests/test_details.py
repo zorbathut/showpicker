@@ -19,15 +19,15 @@ def image_ids(gallery, kind):
 def test_movie_details(client):
     d = client.get(f"/api/title/jf:{MOVIE_ID}").json()
     assert d["key"] == f"jf:{MOVIE_ID}" and d["source"] == "jellyfin" and d["kind"] == "movie"
-    assert (d["title"], d["year"], d["runtime"], d["rating"], d["certification"], d["tagline"]) == (
+    assert (d["title"], d["year"], d["runtime"], d["certification"], d["tagline"]) == (
         "Fake Movie",
         2014,
         169,
-        8.4,
         "PG-13",
         "Mankind was born on Earth.",
     )
     assert d["logo"].startswith(f"/img/jf/{MOVIE_ID}/Logo?w=")
+    assert "rating" not in d  # the fake library sends CommunityRating; it's deliberately not shown
     assert "backdrops" not in d and "stills" not in d
 
 

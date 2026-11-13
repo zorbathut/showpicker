@@ -103,7 +103,6 @@ class TitleInfo:
     tagline: str | None = None
     overview: str | None = None
     genres: list[str] = field(default_factory=list)
-    rating: float | None = None
     certification: str | None = None
     runtime: int | None = None
     seasons: int | None = None
