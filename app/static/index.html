@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Showpicker</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎬</text></svg>">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="bar">
+    <h1>Showpicker</h1>
+    <div class="search">
+      <input id="q" type="search" placeholder="Add a movie or series… (paste a list, one per line)" autocomplete="off" spellcheck="false">
+      <ul id="suggest" hidden></ul>
+    </div>
+    <div class="tools">
+      <button id="present" title="Fullscreen slideshow (←/→ titles, ↑/↓ images, Space pause, Esc exit)">▶ Present</button>
+      <button id="pick" title="Let fate decide">🎲 Pick one</button>
+      <button id="share" title="Copy a link to this lineup">🔗 Link</button>
+      <button id="clear" title="Remove everything">Clear</button>
+    </div>
+  </header>
+
+  <div id="notice" hidden></div>
+  <main id="grid"></main>
+  <p id="empty" hidden>Type a title above to start a lineup.</p>
+
+  <div id="show" hidden>
+    <div class="slide"></div>
+    <div class="slide"></div>
+    <div class="shade"></div>
+    <div class="info">
+      <img class="logo" alt="">
+      <h2 class="logo-text"></h2>
+      <div class="meta"></div>
+      <p class="tagline"></p>
+    </div>
+    <div class="counter"></div>
+    <div class="strip"></div>
+    <button class="close" title="Exit (Esc)">✕</button>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

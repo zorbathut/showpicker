@@ -1,0 +1,8 @@
+services:
+  showpicker:
+    build: .
+    container_name: showpicker
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    env_file: config.env
