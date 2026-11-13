@@ -616,3 +616,25 @@ button:disabled {
   bottom: auto;
   top: 3vh;
 }
+
+/* The tagline's ⊘ sits right after the text, offered the same way as the pictures': hovered, while controls are awake. */
+#show .show-tagline[hidden] {
+  display: none;
+}
+#show .show-tagline .hide {
+  position: static;
+  font-style: normal;
+  font-size: 0.8em;
+  vertical-align: middle;
+  pointer-events: none;
+}
+#show.awake .show-tagline:hover .hide {
+  opacity: 1;
+  pointer-events: auto;
+}
+@media (hover: none) {
+  #show.awake .show-tagline .hide {
+    opacity: 1;
+    pointer-events: auto;
+  }
+}

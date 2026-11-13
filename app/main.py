@@ -50,7 +50,7 @@ class LineupPut(BaseModel):
 
 
 class HiddenPost(BaseModel):
-    """Hide or unhide one picture of a title; `image: null` with `hidden: false` unhides all of that title's pictures."""
+    """Hide or unhide one spoiler (a picture, or the tagline) of a title; `image: null` with `hidden: false` unhides everything hidden for that title."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -82,7 +82,7 @@ def app_create(config: Config, transport: httpx.AsyncBaseTransport | None, clock
     cache: dict[str, tuple[float, dict]] = {}
     # `instance` changes whenever the server restarts, so clients can tell a fresh (empty) lineup from an old version of the one they had.
     lineup = {"instance": uuid.uuid4().hex, "version": 0, "keys": []}
-    # Pictures hidden as spoilers, per title key, by image id (the picture's `full` URL). Versioned separately from the lineup so hiding never makes a lineup edit conflict. Ids come from clients: only ever compared, never rendered.
+    # Spoilers hidden per title key, by id: a picture's `full` URL, or `tagline` (the frontend's id for the title's tagline). Versioned separately from the lineup so hiding never makes a lineup edit conflict. Ids come from clients: only ever compared, never rendered.
     hidden: dict[str, list[str]] = {}
     hidden_state = {"version": 0}
 
@@ -197,7 +197,7 @@ def app_create(config: Config, transport: httpx.AsyncBaseTransport | None, clock
             present = body.image in pictures
             if body.hidden and not present:
                 if sum(len(v) for v in hidden.values()) >= HIDDEN_MAX:
-                    raise HTTPException(400, f"Too many hidden pictures ({HIDDEN_MAX} max); unhide some first")
+                    raise HTTPException(400, f"Too many hidden spoilers ({HIDDEN_MAX} max); unhide some first")
                 hidden[body.key] = [*pictures, body.image]
             elif not body.hidden and present:
                 remaining = [p for p in pictures if p != body.image]

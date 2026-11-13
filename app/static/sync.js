@@ -1,8 +1,8 @@
-// Keeps this screen's copy of the shared lineup, and of the pictures hidden as spoilers, in step with the server.
+// Keeps this screen's copy of the shared lineup, and of the spoilers (pictures, taglines) hidden from it, in step with the server.
 //
 // The server holds one lineup with an (instance, version) stamp; a PUT must name the stamp it was based on or gets 409 with the current state (see `api_lineup_put` in app/main.py). This module serializes this screen's PUTs, polls for other screens' changes, and decides which server states to adopt.
 //
-// Hidden pictures are idempotent per-picture operations with their own version, so they never conflict. What this screen shows is the server's last map with this screen's unconfirmed operations applied on top: a hide that hasn't reached the server yet (offline, say) stays hidden here and is resent, rather than flickering back.
+// Hidden spoilers are idempotent per-item operations with their own version, so they never conflict. What this screen shows is the server's last map with this screen's unconfirmed operations applied on top: a hide that hasn't reached the server yet (offline, say) stays hidden here and is resent, rather than flickering back.
 //
 // `transport(method, path, body)` performs a request and resolves to {status, body}; it rejects only on network failure. Callbacks:
 // - onAdopt(keys): the lineup was replaced from the server.

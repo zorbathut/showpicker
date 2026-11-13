@@ -67,7 +67,7 @@ def test_limit_refuses_only_new_hides(client, monkeypatch):
     hide(client, MOVIE, "/img/a")
     hide(client, SERIES, "/img/b")
     r = hide(client, MOVIE, "/img/c")
-    assert r.status_code == 400 and "Too many hidden pictures" in r.json()["detail"]
+    assert r.status_code == 400 and "Too many hidden spoilers" in r.json()["detail"]
     assert hide(client, MOVIE, "/img/a").status_code == 200
     assert hide(client, MOVIE, "/img/a", hidden=False).status_code == 200
     assert hide(client, MOVIE, "/img/c").status_code == 200

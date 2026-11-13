@@ -58,6 +58,10 @@ async function api(url, options) {
   return r.json();
 }
 
+function capitalize(s) {
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}
+
 function plural(n, word) {
   return `${n} ${word}${n === 1 ? "" : "s"}`;
 }
@@ -394,15 +398,26 @@ async function lineupImport(keys, onSaved) {
   notice(parts.join(" "), NOTICE_LONG_MS);
 }
 
+// Hidden-map id for a title's tagline. Picture ids are URLs, so it can't collide with one.
+const HIDDEN_TAGLINE = "tagline";
+
 // A title's pictures minus the ones hidden as spoilers. Everything that shows pictures goes through this.
 function galleryOf(d) {
   const hidden = state.hidden[d.key];
   return hidden ? d.gallery.filter((p) => !hidden.includes(p.full)) : d.gallery;
 }
 
-function pictureHide(key, image) {
-  sync.hide(key, image, true).catch(reportError);
-  noticeAction("Picture hidden.", NOTICE_LONG_MS, "Undo", () => sync.hide(key, image, false).catch(reportError));
+$(".show-tagline .hide").dataset.image = HIDDEN_TAGLINE;
+
+function taglineOf(d) {
+  return state.hidden[d.key]?.includes(HIDDEN_TAGLINE) ? null : d.tagline;
+}
+
+// Hides a picture (by its id) or the tagline (HIDDEN_TAGLINE) on every screen, offering Undo.
+function spoilerHide(key, id) {
+  sync.hide(key, id, true).catch(reportError);
+  const what = id === HIDDEN_TAGLINE ? "Tagline" : "Picture";
+  noticeAction(`${what} hidden.`, NOTICE_LONG_MS, "Undo", () => sync.hide(key, id, false).catch(reportError));
 }
 
 function cardFlash(i) {
@@ -441,9 +456,16 @@ function cardHtml(key, i) {
       <div class="body"><div class="meta">Couldn't load <code>${esc(key)}</code>: ${esc(d.error)}</div></div>${actions}</article>`;
   }
   const gallery = galleryOf(d);
-  const hero = gallery[0]?.full || d.poster;
+  // The poster stands in only for titles that have no pictures at all; if they were all hidden, the logo stands alone.
+  const hero = gallery[0]?.full || (d.gallery.length ? null : d.poster);
   const strip = gallery.slice(1, 5);
-  const hiddenCount = d.gallery.length - gallery.length;
+  const hiddenParts = [];
+  if (d.gallery.length > gallery.length) {
+    hiddenParts.push(plural(d.gallery.length - gallery.length, "picture"));
+  }
+  if (d.tagline && !taglineOf(d)) {
+    hiddenParts.push("the tagline");
+  }
   return `
     <article class="card${key === state.winnerKey ? " winner" : ""}" ${attrs}>
       <div class="hero" data-act="show" data-img="0" ${hero ? `style="background-image:${esc(cssUrl(hero))}"` : ""}>
@@ -452,7 +474,7 @@ function cardHtml(key, i) {
       </div>
       <div class="body">
         <div class="meta">${d.logo ? `<b>${esc(d.title)}</b> · ` : ""}${metaParts(d).map(esc).join(" · ")}</div>
-        ${hiddenCount ? `<button type="button" class="unhide" data-act="unhide" title="Show the pictures hidden as spoilers">${plural(hiddenCount, "picture")} hidden · show all</button>` : ""}
+        ${hiddenParts.length ? `<button type="button" class="unhide" data-act="unhide" title="Show what was hidden as spoilers">${capitalize(hiddenParts.join(" and "))} hidden · show all</button>` : ""}
         ${d.genres.length ? `<div class="genres">${d.genres.slice(0, 4).map(esc).join(" · ")}</div>` : ""}
         ${d.overview ? `<p class="overview">${esc(d.overview)}</p>` : ""}
         ${
@@ -497,7 +519,7 @@ $("#grid").addEventListener("click", (ev) => {
       showOpen(card.dataset.key, Number(t.dataset.img));
       break;
     case "hide":
-      pictureHide(card.dataset.key, t.dataset.image);
+      spoilerHide(card.dataset.key, t.dataset.image);
       break;
     case "unhide":
       sync.hide(card.dataset.key, null, false).catch(reportError);
@@ -722,8 +744,13 @@ function showPaint() {
 
   const key = showState.key;
   const d = key ? state.details[key] : null;
+  // The tagline is updated on every paint: hiding it doesn't touch the gallery.
+  const tagline = d && !d.error ? taglineOf(d) : null;
+  $(".show-tagline-text", show).textContent = tagline || "";
+  $(".show-tagline", show).hidden = !tagline;
   const gallery = d && !d.error ? galleryOf(d) : [];
-  const posterOnly = Boolean(!gallery.length && d?.poster);
+  // The poster stands in only for titles that have no pictures at all; if they were all hidden, the band stands alone.
+  const posterOnly = Boolean(d && !d.error && !d.gallery.length && d.poster);
   const cells = posterOnly ? [{ full: d.poster }] : gallery;
   const ids = cells.map((p) => p.full);
   const loaded = d ? (d.error ?? "ok") : null;
@@ -764,7 +791,6 @@ function showPaint() {
     : d.error
       ? `Couldn't load: ${d.error}`
       : [...metaParts(d), ...(d.genres.length ? [d.genres.slice(0, 3).join(", ")] : [])].join("  ·  ");
-  $(".show-tagline", show).textContent = d?.tagline || "";
 
   const rebuild = () => {
     showGallery.classList.toggle("poster-only", posterOnly);
@@ -828,10 +854,10 @@ function showKeepPlace(keep, mutate) {
   }
 }
 
-showGallery.addEventListener("click", (ev) => {
+showScroll.addEventListener("click", (ev) => {
   const button = ev.target.closest("[data-act=hide]");
   if (button && showState.painted) {
-    pictureHide(showState.painted.key, button.dataset.image);
+    spoilerHide(showState.painted.key, button.dataset.image);
   }
 });
 
