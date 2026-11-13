@@ -59,6 +59,11 @@ export function syncCreate(transport, callbacks) {
           connection(false, e);
           return false;
         }
+        if (res.status >= 500) {
+          s.unsynced = true;
+          connection(false, new Error(`HTTP ${res.status}`));
+          return false;
+        }
         connection(true);
         if (res.status === 409) {
           const sameKeys = res.body.keys.join(",") === s.keys.join(",");
@@ -67,10 +72,6 @@ export function syncCreate(transport, callbacks) {
           if (!sameKeys) {
             callbacks.onConflict();
           }
-          return false;
-        }
-        if (res.status >= 500) {
-          s.unsynced = true;
           return false;
         }
         if (res.status !== 200) {
@@ -88,9 +89,9 @@ export function syncCreate(transport, callbacks) {
   }
 
   async function poll() {
+    // Resend whatever failed before, then fetch fresh state either way, so a request the server keeps refusing with 5xx can't stop this screen from seeing other screens' changes.
     if (s.unsynced) {
       await push();
-      return;
     }
     let res;
     try {

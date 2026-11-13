@@ -155,9 +155,12 @@ test("a PUT that fails on the network is retried by the next poll, and connectiv
   let polled = sync.poll();
   assert.equal(server.pending[0].method, "PUT");
   await server.fail();
+  assert.equal(server.pending[0].method, "GET", "the poll still checks for other screens' changes");
+  await server.fail();
   await polled;
   assert.deepEqual(rec.events, [["connection", false]]);
   polled = sync.poll();
+  await server.answer(200, { instance: "i1", version: 6, keys: ["mine"] });
   await server.answer(200, { instance: "i1", version: 6, keys: ["mine"] });
   await polled;
   assert.deepEqual(rec.events, [
@@ -166,6 +169,8 @@ test("a PUT that fails on the network is retried by the next poll, and connectiv
   ]);
   polled = sync.poll();
   assert.equal(server.pending[0].method, "GET");
+  await server.answer(200, { instance: "i1", version: 6, keys: ["mine"] });
+  await polled;
 });
 
 test("a refused edit is reported and the server's lineup is taken on the next poll even at the same version", async () => {
@@ -179,14 +184,18 @@ test("a refused edit is reported and the server's lineup is taken on the next po
   assert.deepEqual(rec.events.at(-1), ["adopt", ["tmdb:movie:1"]]);
 });
 
-test("a server error on PUT is retried rather than adopted over", async () => {
-  const { server, sync } = setup();
+test("a server error on PUT is reported, retried, and doesn't stop polling", async () => {
+  const { server, rec, sync } = setup();
   pending(sync.edit(["mine"]));
   await server.answer(502, { detail: "Bad Gateway" });
+  assert.deepEqual(rec.events, [["connection", false]]);
   const polled = sync.poll();
   assert.deepEqual(server.pending[0].body.keys, ["mine"]);
-  await server.answer(200, { instance: "i1", version: 6, keys: ["mine"] });
+  await server.answer(502, { detail: "Bad Gateway" });
+  assert.equal(server.pending[0].method, "GET");
+  await server.answer(200, START);
   await polled;
+  assert.deepEqual(sync.keys(), ["mine"], "the pending edit isn't adopted over");
 });
 
 test("GET failures report a lost connection once until a poll succeeds", async () => {
