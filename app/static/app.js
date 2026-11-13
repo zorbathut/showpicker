@@ -642,6 +642,8 @@ function showOpen(key, imageIndex) {
   showState.key = key;
   showState.painted = null;
   show.hidden = false;
+  // Notices must be visible over the presentation, including in fullscreen, where only #show is shown.
+  show.append($("#status"), $("#notice"));
   document.body.classList.add("showing");
   showScroll.focus({ preventScroll: true });
   showWake();
@@ -656,6 +658,7 @@ function showOpen(key, imageIndex) {
 
 function showClose() {
   show.hidden = true;
+  $("#grid").before($("#status"), $("#notice"));
   document.body.classList.remove("showing");
   if (document.fullscreenElement) {
     document.exitFullscreen().catch((e) => console.warn("leaving fullscreen failed:", e));

@@ -550,3 +550,20 @@ button:disabled {
     width: 44px;
   }
 }
+
+/* Notices move into #show while presenting (so they're visible in fullscreen) and float over it. */
+#show #notice,
+#show #status {
+  position: fixed;
+  left: 50%;
+  bottom: 3vh;
+  transform: translateX(-50%);
+  margin: 0;
+  z-index: 2;
+  max-width: 80vw;
+  font-size: clamp(14px, 2vh, 26px);
+}
+#show #status {
+  bottom: auto;
+  top: 3vh;
+}
