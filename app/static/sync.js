@@ -2,7 +2,7 @@
 //
 // The server holds one lineup with an (instance, version) stamp; a PUT must name the stamp it was based on or gets 409 with the current state (see `api_lineup_put` in app/main.py). This module serializes this screen's PUTs, polls for other screens' changes, and decides which server states to adopt.
 //
-// Hidden spoilers are idempotent per-item operations with their own version, so they never conflict. What this screen shows is the server's last map with this screen's unconfirmed operations applied on top: a hide that hasn't reached the server yet (offline, say) stays hidden here and is resent, rather than flickering back.
+// Hidden spoilers are a keyed store (see keyedStoreCreate): idempotent per-item operations with their own version, so they never conflict with lineup edits.
 //
 // `transport(method, path, body)` performs a request and resolves to {status, body}; it rejects only on network failure. Callbacks:
 // - onAdopt(keys): the lineup was replaced from the server.
@@ -11,6 +11,101 @@
 // - onHidden(map): the effective hidden-pictures map ({title key: [image id]}) changed.
 // - onHideRefused(message): the server refused a hide (dropped).
 // - onConnection(ok, error): connectivity changed (reported on transitions only).
+
+// A shared map {title key: [ids]} kept on the server with its own version: this screen sends idempotent operations (one at a time, resent after failures) and shows the server's last map with its own unconfirmed operations applied on top, so a change that hasn't reached the server yet never flickers back.
+// spec: {path (POST endpoint), field and versionField (in server replies), apply(map, op) (mutates map), same(a, b) (whether two maps look the same to the user), onChange(map), onRefused(message)}; `connection(ok, error)` reports connectivity.
+// A comparable signature of a {title key: [ids]} map, ignoring key order and, when `sortValues`, the order within each list.
+function mapSig(map, sortValues) {
+  return JSON.stringify(
+    Object.keys(map)
+      .sort()
+      .map((key) => [key, sortValues ? [...map[key]].sort() : map[key]]),
+  );
+}
+
+function keyedStoreCreate(spec, transport, connection) {
+  const k = {
+    server: {}, // the last map adopted from the server
+    instance: null,
+    version: 0,
+    ops: [], // unconfirmed operations, oldest first
+    sending: false,
+    effective: {}, // server with ops applied
+  };
+
+  function recompute() {
+    const map = Object.fromEntries(Object.entries(k.server).map(([key, v]) => [key, [...v]]));
+    for (const op of k.ops) {
+      spec.apply(map, op);
+    }
+    if (!spec.same(map, k.effective)) {
+      k.effective = map;
+      spec.onChange(map);
+    }
+  }
+
+  // Responses can arrive out of order (a slow POST after a newer poll), so only move forward within one server instance.
+  function adopt(body) {
+    const version = body[spec.versionField] ?? 0;
+    if (body.instance !== k.instance || version >= k.version) {
+      k.instance = body.instance;
+      k.version = version;
+      k.server = body[spec.field] ?? {};
+    }
+  }
+
+  // Network errors and server errors leave the operation queued for the next poll to resend.
+  async function send() {
+    if (k.sending) {
+      return;
+    }
+    k.sending = true;
+    try {
+      while (k.ops.length) {
+        let res;
+        try {
+          res = await transport("POST", spec.path, k.ops[0]);
+        } catch (e) {
+          connection(false, e);
+          return;
+        }
+        if (res.status >= 500) {
+          connection(false, new Error(`HTTP ${res.status}`));
+          return;
+        }
+        connection(true);
+        k.ops.shift();
+        if (res.status === 200) {
+          adopt(res.body);
+        } else {
+          spec.onRefused(typeof res.body?.detail === "string" ? res.body.detail : `HTTP ${res.status}`);
+        }
+        recompute();
+      }
+    } finally {
+      k.sending = false;
+    }
+  }
+
+  return {
+    start(body) {
+      adopt(body);
+      k.effective = k.server;
+    },
+    map: () => k.effective,
+    change(op) {
+      k.ops.push(op);
+      recompute();
+      return send();
+    },
+    pending: () => k.ops.length > 0,
+    send,
+    adoptPolled(body) {
+      adopt(body);
+      recompute();
+    },
+  };
+}
 
 export function syncCreate(transport, callbacks) {
   const s = {
@@ -22,82 +117,31 @@ export function syncCreate(transport, callbacks) {
     unsynced: false, // a push failed for network/server reasons; the next poll retries it
     resync: false, // the server refused an edit; take its lineup on the next poll regardless of version
     connected: true,
-    hiddenServer: {}, // the last hidden map adopted from the server
-    hiddenInstance: null,
-    hiddenVersion: 0,
-    hiddenOps: [], // this screen's unconfirmed {key, image, hidden} operations, oldest first
-    hiddenSending: false,
-    hiddenEffective: {}, // hiddenServer with hiddenOps applied
   };
 
-  // Order-insensitive: the overlay appends pending hides while the server keeps insertion order, and a confirmation shouldn't count as a change.
-  function hiddenSig(map) {
-    return JSON.stringify(
-      Object.keys(map)
-        .sort()
-        .map((k) => [k, [...map[k]].sort()]),
-    );
-  }
-
-  function hiddenRecompute() {
-    const map = Object.fromEntries(Object.entries(s.hiddenServer).map(([k, v]) => [k, [...v]]));
-    for (const op of s.hiddenOps) {
-      const list = map[op.key] ?? [];
-      const rest = op.image === null ? [] : list.filter((image) => image !== op.image);
-      const next = op.hidden ? [...rest, op.image] : rest;
-      if (next.length) {
-        map[op.key] = next;
-      } else {
-        delete map[op.key];
-      }
-    }
-    if (hiddenSig(map) !== hiddenSig(s.hiddenEffective)) {
-      s.hiddenEffective = map;
-      callbacks.onHidden(map);
-    }
-  }
-
-  // Responses can arrive out of order (a slow POST after a newer poll), so only move forward within one server instance.
-  function hiddenAdopt(body) {
-    if (body.instance !== s.hiddenInstance || body.hidden_version >= s.hiddenVersion) {
-      s.hiddenInstance = body.instance;
-      s.hiddenVersion = body.hidden_version;
-      s.hiddenServer = body.hidden;
-    }
-  }
-
-  // Sends queued hide operations one at a time. Network errors and server errors leave the operation queued for the next poll to resend.
-  async function hiddenSend() {
-    if (s.hiddenSending) {
-      return;
-    }
-    s.hiddenSending = true;
-    try {
-      while (s.hiddenOps.length) {
-        let res;
-        try {
-          res = await transport("POST", "/api/hidden", s.hiddenOps[0]);
-        } catch (e) {
-          connection(false, e);
-          return;
-        }
-        if (res.status >= 500) {
-          connection(false, new Error(`HTTP ${res.status}`));
-          return;
-        }
-        connection(true);
-        s.hiddenOps.shift();
-        if (res.status === 200) {
-          hiddenAdopt(res.body);
+  const hidden = keyedStoreCreate(
+    {
+      path: "/api/hidden",
+      field: "hidden",
+      versionField: "hidden_version",
+      apply(map, op) {
+        const list = map[op.key] ?? [];
+        const rest = op.image === null ? [] : list.filter((image) => image !== op.image);
+        const next = op.hidden ? [...rest, op.image] : rest;
+        if (next.length) {
+          map[op.key] = next;
         } else {
-          callbacks.onHideRefused(typeof res.body?.detail === "string" ? res.body.detail : `HTTP ${res.status}`);
+          delete map[op.key];
         }
-        hiddenRecompute();
-      }
-    } finally {
-      s.hiddenSending = false;
-    }
-  }
+      },
+      // Order-insensitive: the overlay appends pending hides while the server keeps insertion order, and a confirmation shouldn't count as a change.
+      same: (a, b) => mapSig(a, true) === mapSig(b, true),
+      onChange: (map) => callbacks.onHidden(map),
+      onRefused: (message) => callbacks.onHideRefused(message),
+    },
+    transport,
+    connection,
+  );
 
   function connection(ok, error) {
     if (ok !== s.connected) {
@@ -172,8 +216,8 @@ export function syncCreate(transport, callbacks) {
     if (s.unsynced) {
       await push();
     }
-    if (s.hiddenOps.length) {
-      await hiddenSend();
+    if (hidden.pending()) {
+      await hidden.send();
     }
     let res;
     try {
@@ -187,8 +231,7 @@ export function syncCreate(transport, callbacks) {
       return;
     }
     connection(true);
-    hiddenAdopt(res.body);
-    hiddenRecompute();
+    hidden.adoptPolled(res.body);
     // Expected race: this screen's PUT is in flight, so adopting now would briefly overwrite its edit; that PUT's own response (or its 409) settles the state. A GET that left before an edit needs no guard: it can only carry the stamp that edit was based on, or a newer one that makes the PUT 409.
     if (s.pushing) {
       return;
@@ -203,16 +246,13 @@ export function syncCreate(transport, callbacks) {
     start(server) {
       stamp(server);
       s.keys = [...server.keys];
-      hiddenAdopt(server);
-      s.hiddenEffective = s.hiddenServer;
+      hidden.start(server);
     },
     keys: () => s.keys,
-    hidden: () => s.hiddenEffective,
+    hidden: () => hidden.map(),
     // `image` null with `hidden` false unhides all of that title's pictures.
-    hide(key, image, hidden) {
-      s.hiddenOps.push({ key, image, hidden });
-      hiddenRecompute();
-      return hiddenSend();
+    hide(key, image, isHidden) {
+      return hidden.change({ key, image, hidden: isHidden });
     },
     edit(keys) {
       s.keys = [...keys];
