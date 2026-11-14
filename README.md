@@ -1,11 +1,8 @@
 # Showpicker
 
-Type in a few movie or series names. For each one, Showpicker shows the title logo, backdrops and stills, and the basic facts. The point is to put the candidates on the TV and argue about what to watch next.
+Put movie and show pictures on the TV so you can argue about which one to watch next.
 
-* **Jellyfin**: searches your library and pulls its logos, backdrops, episode stills (series) or chapter images (movies). Images are proxied, so the browser never sees your API key.
-* **TMDB**: finds titles you don't own, and supplies backdrops/logos for library items.
-
-Configure either or both.
+Supports both Jellyfin and TMDB for data retrieval.
 
 ## Run
 
@@ -26,7 +23,7 @@ Then open http://localhost:8000. If the container keeps restarting, the configur
 * **🎲 Pick one** picks a title at random.
 * The lineup is kept on the server and shared by everyone viewing the page: set it up on a laptop, open the page on the TV, and it's there. Changes show up on other screens within a few seconds. It's held in memory (as are hidden pictures), so restarting the server clears it.
 
-Spoilers: series stills come from early episodes (specials skipped), and movie chapter images come from the first 60% of the film.
+Spoilers: series stills come from early episodes (specials skipped), and movie chapter images come from the first 60% of the film. This could probably be improved.
 
 There's no auth. Anyone who can reach the port can search your library, see its artwork, and edit the shared lineup, so keep it on your LAN or put it behind your reverse proxy's auth.
 
