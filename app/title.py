@@ -120,9 +120,11 @@ class TitleDraft:
     info: TitleInfo
     backdrops: list[dict]
     stills: list[dict]
+    title_art: dict | None  # landscape key art with the title on it; leads the gallery
     tmdb_id: str | None  # a library item's TMDB id, used to top up its artwork
     degraded: bool = False  # part of the artwork failed to load (and was logged); don't cache this result for long
 
     def payload(self) -> dict:
-        gallery = gallery_order(self.backdrops[:MAX_BACKDROPS], self.stills[:MAX_STILLS])
-        return {"key": title_key_format(self.key), "source": self.source, "kind": self.kind, **asdict(self.info), "gallery": gallery}
+        gallery = ([self.title_art] if self.title_art else []) + gallery_order(self.backdrops[:MAX_BACKDROPS], self.stills[:MAX_STILLS])
+        title_art = self.title_art["full"] if self.title_art else None
+        return {"key": title_key_format(self.key), "source": self.source, "kind": self.kind, **asdict(self.info), "gallery": gallery, "title_art": title_art}

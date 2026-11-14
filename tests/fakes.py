@@ -33,8 +33,8 @@ def jf_episode(index: int, season: int | None) -> dict:
     return ep
 
 
-def tmdb_image(path: str, lang: str | None, votes: float) -> dict:
-    return {"file_path": path, "iso_639_1": lang, "vote_average": votes, "width": 1920, "height": 1080}
+def tmdb_image(path: str, lang: str | None, votes: float, count: int = 0) -> dict:
+    return {"file_path": path, "iso_639_1": lang, "vote_average": votes, "vote_count": count, "width": 1920, "height": 1080}
 
 
 class FakeUpstream:

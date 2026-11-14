@@ -28,12 +28,18 @@ def tmdb_pic(path: str) -> dict:
     return pic(tmdb_img(FULL, path), tmdb_img(THUMB, path))
 
 
-def pick_images(images: dict) -> tuple[str | None, list[dict]]:
-    """The best logo (English first, then by votes) and backdrops ranked textless-first, since a baked-in title clashes with our own logo."""
-    logos = sorted(images["logos"], key=lambda logo: (logo.get("iso_639_1") != "en", -(logo.get("vote_average") or 0)))
-    backdrops = sorted(images["backdrops"], key=lambda b: (b.get("iso_639_1") is not None, -(b.get("vote_average") or 0)))
+def by_votes(image: dict) -> tuple:
+    """Best first; vote_count and then file_path break ties (many images have no votes at all), so the choice is stable across refreshes."""
+    return (-(image.get("vote_average") or 0), -(image.get("vote_count") or 0), image["file_path"])
+
+
+def pick_images(images: dict) -> tuple[str | None, list[dict], list[dict]]:
+    """The best logo (English first); the backdrops with English text, i.e. with the title on them (best first: the first is the title art); and the other backdrops, textless first."""
+    logos = sorted(images["logos"], key=lambda logo: (logo.get("iso_639_1") != "en", by_votes(logo)))
+    titled = sorted((b for b in images["backdrops"] if b.get("iso_639_1") == "en"), key=by_votes)
+    others = sorted((b for b in images["backdrops"] if b.get("iso_639_1") != "en"), key=lambda b: (b.get("iso_639_1") is not None, by_votes(b)))
     logo = tmdb_img(LOGO, logos[0]["file_path"]) if logos else None
-    return logo, [tmdb_pic(b["file_path"]) for b in backdrops]
+    return logo, [tmdb_pic(b["file_path"]) for b in titled], [tmdb_pic(b["file_path"]) for b in others]
 
 
 class Tmdb:
@@ -72,7 +78,7 @@ class Tmdb:
                 break
         return out
 
-    async def images(self, media: str, tmdb_id: str | int) -> tuple[str | None, list[dict]]:
+    async def images(self, media: str, tmdb_id: str | int) -> tuple[str | None, list[dict], list[dict]]:
         return pick_images(await self.get(f"/{media}/{tmdb_id}/images", {"include_image_language": "en,null"}))
 
     async def details(self, media: str, tmdb_id: int) -> TitleDraft | None:
@@ -84,7 +90,8 @@ class Tmdb:
                 return None
             raise
         series = media == "tv"
-        logo, backdrops = pick_images(data["images"])
+        logo, titled, others = pick_images(data["images"])
+        title_art, backdrops = (titled[0], [*others, *titled[1:]]) if titled else (None, others)
         stills = []
         degraded = False
         if series:
@@ -115,6 +122,7 @@ class Tmdb:
             ),
             backdrops=backdrops,
             stills=stills,
+            title_art=title_art,
             tmdb_id=None,
             degraded=degraded,
         )

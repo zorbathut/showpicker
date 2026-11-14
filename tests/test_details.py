@@ -62,6 +62,7 @@ def test_tmdb_artwork_failure_falls_back_to_library(client, upstream, expected_l
     expected_logs.append("using library artwork only")
     d = client.get(f"/api/title/jf:{MOVIE_ID}").json()
     assert image_ids(d["gallery"], "Backdrop") == ["0"]
+    assert not any("tmdb.org" in p["full"] for p in d["gallery"])
 
 
 def test_no_tmdb_call_without_provider_id_or_without_tmdb(client, connect, upstream):
@@ -110,8 +111,64 @@ def test_tmdb_movie_details(connect, upstream):
     with connect(CONFIG_TMDB) as c:
         d = c.get("/api/title/tmdb:movie:329865").json()
     assert (d["title"], d["year"], d["runtime"], d["tagline"], d["genres"]) == ("Arrival", 2016, 116, None, ["Drama"])
-    assert [p["full"].rsplit("/", 1)[1] for p in d["gallery"]] == ["textless-high.jpg", "textless-low.jpg", "with-text.jpg"]
+    # The English backdrop is the title art and leads; the rest are ranked textless-first.
+    assert [p["full"].rsplit("/", 1)[1] for p in d["gallery"]] == ["with-text.jpg", "textless-high.jpg", "textless-low.jpg"]
     assert all(p["full"].startswith("https://image.tmdb.org/t/p/w1280/") for p in d["gallery"])
+
+
+def test_tmdb_title_art_choice(connect, upstream):
+    upstream.tmdb["/movie/329865"] = {
+        "id": 329865,
+        "title": "Arrival",
+        "images": {
+            "logos": [],
+            "backdrops": [
+                tmdb_image("/en-a.jpg", "en", 5, count=10),
+                tmdb_image("/en-b.jpg", "en", 5, count=50),  # ties en-a on votes, wins on vote count
+                tmdb_image("/en-c.jpg", "en", 3),
+                tmdb_image("/textless.jpg", None, 9),
+            ],
+        },
+    }
+    with connect(CONFIG_TMDB) as c:
+        d = c.get("/api/title/tmdb:movie:329865").json()
+    assert [p["full"].rsplit("/", 1)[1] for p in d["gallery"]] == ["en-b.jpg", "textless.jpg", "en-a.jpg", "en-c.jpg"]
+
+
+def test_library_thumb_leads(client, upstream):
+    upstream.jf_items[MOVIE_ID]["ImageTags"]["Thumb"] = "t1"
+    d = client.get(f"/api/title/jf:{MOVIE_ID}").json()
+    assert d["gallery"][0]["full"].startswith(f"/img/jf/{MOVIE_ID}/Thumb?w=") and "tag=t1" in d["gallery"][0]["full"]
+
+
+def test_library_thumb_leads_and_tmdb_titled_backdrops_are_dropped(client, upstream):
+    # Jellyfin's Thumb is usually a copy of one of TMDB's titled backdrops (not necessarily the best-voted), so none of them are shown.
+    upstream.jf_items[MOVIE_ID]["ImageTags"]["Thumb"] = "t1"
+    upstream.tmdb["/movie/157336/images"]["backdrops"] += [tmdb_image("/tmdb-title.jpg", "en", 5), tmdb_image("/tmdb-title-2.jpg", "en", 1)]
+    gallery = client.get(f"/api/title/jf:{MOVIE_ID}").json()["gallery"]
+    assert "/Thumb?" in gallery[0]["full"]
+    backdrops = [p["full"].rsplit("/", 1)[1] for p in gallery if "tmdb.org" in p["full"]]
+    assert backdrops == ["tb0.jpg", "tb1.jpg", "tb2.jpg"]
+
+
+def test_tmdb_backdrop_count_includes_titled_backdrops(client, upstream):
+    # Library: 3 backdrops. TMDB: 2 textless + 1 titled = 3, which is "at least as many", so TMDB's set is used and its titled one leads.
+    upstream.jf_items[MOVIE_ID]["BackdropImageTags"] = ["x0", "x1", "x2"]
+    upstream.tmdb["/movie/157336/images"]["backdrops"] = [
+        tmdb_image("/tb0.jpg", None, 5),
+        tmdb_image("/tb1.jpg", None, 4),
+        tmdb_image("/tmdb-title.jpg", "en", 1),
+    ]
+    gallery = client.get(f"/api/title/jf:{MOVIE_ID}").json()["gallery"]
+    assert gallery[0]["full"].endswith("/tmdb-title.jpg")
+    assert image_ids(gallery, "Backdrop") == []
+
+
+def test_library_without_thumb_takes_tmdb_title_art(client, upstream):
+    upstream.tmdb["/movie/157336/images"]["backdrops"].append(tmdb_image("/tmdb-title.jpg", "en", 1))
+    gallery = client.get(f"/api/title/jf:{MOVIE_ID}").json()["gallery"]
+    assert gallery[0]["full"] == "https://image.tmdb.org/t/p/w1280/tmdb-title.jpg"
+    assert sum("tmdb-title.jpg" in p["full"] for p in gallery) == 1
 
 
 def test_tmdb_series_details_with_season_one_stills(connect, upstream):

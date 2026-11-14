@@ -1,6 +1,6 @@
 import pytest
 
-from app.title import ErrorTitleKey, TitleKeyJellyfin, TitleKeyTmdb, gallery_order, spread, title_key_format, title_key_parse
+from app.title import ErrorTitleKey, TitleDraft, TitleInfo, TitleKeyJellyfin, TitleKeyTmdb, gallery_order, spread, title_key_format, title_key_parse
 
 # Shared with test_lineup.py and test_routes.py so /api/title and /api/lineup are checked against the same key cases.
 VALID_KEYS = {
@@ -51,3 +51,21 @@ def test_gallery_more_stills_than_backdrops():
 def test_gallery_only_stills_or_empty():
     assert gallery_order([], ["s0", "s1"]) == ["s0", "s1"]
     assert gallery_order([], []) == []
+
+
+def draft(title_art):
+    return TitleDraft(
+        key=TitleKeyTmdb("movie", 1), source="tmdb", kind="movie", info=TitleInfo(), backdrops=["b0", "b1"], stills=["s0"], title_art=title_art, tmdb_id=None
+    )
+
+
+def test_payload_title_art_leads_the_gallery():
+    payload = draft({"full": "t"}).payload()
+    assert payload["gallery"] == [{"full": "t"}, "b0", "s0", "b1"]
+    assert payload["title_art"] == "t"
+
+
+def test_payload_without_title_art():
+    payload = draft(None).payload()
+    assert payload["gallery"] == ["b0", "s0", "b1"]
+    assert payload["title_art"] is None

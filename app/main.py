@@ -95,15 +95,22 @@ def app_create(config: Config, transport: httpx.AsyncBaseTransport | None, clock
     app = FastAPI(title="Showpicker", lifespan=lifespan)
 
     async def tmdb_top_up(draft: TitleDraft) -> None:
-        """Library artwork usually came from TMDB in the first place, so mixing both sets shows duplicates: use TMDB's backdrops instead of the library's when TMDB has at least as many."""
+        """Library artwork usually came from TMDB in the first place, so mixing both sets shows duplicates: use TMDB's backdrops instead of the library's when TMDB has at least as many. TMDB also supplies title art and a logo when the library lacks them."""
         media = "tv" if draft.kind == "series" else "movie"
         try:
-            logo, backdrops = await tmdb.images(media, draft.tmdb_id)
+            logo, titled, others = await tmdb.images(media, draft.tmdb_id)
         except httpx.HTTPError as e:
             log.warning("TMDB artwork for %s (tmdb %s) failed, using library artwork only: %s", draft.key, draft.tmdb_id, describe(e, secrets))
             draft.degraded = True
             return
-        if len(backdrops) >= len(draft.backdrops):
+        use_tmdb_backdrops = len(others) + len(titled) >= len(draft.backdrops)
+        if draft.title_art is None and titled:
+            draft.title_art = titled[0]
+            backdrops = [*others, *titled[1:]]
+        else:
+            # With no titled backdrops this is all of them. When the library has its own title art (Jellyfin's Thumb), it's usually a copy of one of TMDB's titled backdrops, not necessarily the best-voted one: drop them all rather than show it twice.
+            backdrops = others
+        if use_tmdb_backdrops:
             draft.backdrops = backdrops
         if not draft.info.logo:
             draft.info.logo = logo

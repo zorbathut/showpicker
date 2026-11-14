@@ -458,6 +458,8 @@ function cardHtml(key, i) {
   const gallery = galleryOf(d);
   // The poster stands in only for titles that have no pictures at all; if they were all hidden, the logo stands alone.
   const hero = gallery[0]?.full || (d.gallery.length ? null : d.poster);
+  // Title art already carries the title; a logo on top of it doubles (and often overlaps) it. The title stays in the meta line either way.
+  const heroIsTitleArt = Boolean(hero) && hero === d.title_art;
   const strip = gallery.slice(1, 5);
   const hiddenParts = [];
   if (d.gallery.length > gallery.length) {
@@ -469,11 +471,11 @@ function cardHtml(key, i) {
   return `
     <article class="card${key === state.winnerKey ? " winner" : ""}" ${attrs}>
       <div class="hero" data-act="show" data-img="0" ${hero ? `style="background-image:${esc(cssUrl(hero))}"` : ""}>
-        ${d.logo ? `<img class="logo" src="${esc(d.logo)}" alt="${esc(d.title)}">` : `<h2 class="logo-text">${esc(d.title)}</h2>`}
+        ${heroIsTitleArt ? "" : d.logo ? `<img class="logo" src="${esc(d.logo)}" alt="${esc(d.title)}">` : `<h2 class="logo-text">${esc(d.title)}</h2>`}
         ${d.source === "jellyfin" ? `<span class="badge">In library</span>` : ""}
       </div>
       <div class="body">
-        <div class="meta">${d.logo ? `<b>${esc(d.title)}</b> · ` : ""}${metaParts(d).map(esc).join(" · ")}</div>
+        <div class="meta">${d.logo || heroIsTitleArt ? `<b>${esc(d.title)}</b> · ` : ""}${metaParts(d).map(esc).join(" · ")}</div>
         ${hiddenParts.length ? `<button type="button" class="unhide" data-act="unhide" title="Show what was hidden as spoilers">${capitalize(hiddenParts.join(" and "))} hidden · show all</button>` : ""}
         ${d.genres.length ? `<div class="genres">${d.genres.slice(0, 4).map(esc).join(" · ")}</div>` : ""}
         ${d.overview ? `<p class="overview">${esc(d.overview)}</p>` : ""}

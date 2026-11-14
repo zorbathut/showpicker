@@ -137,6 +137,7 @@ class Jellyfin:
             ),
             backdrops=[proxy_pic(iid, "Backdrop", i, t) for i, t in enumerate(it["BackdropImageTags"])],
             stills=stills,
+            title_art=proxy_pic(iid, "Thumb", None, tags["Thumb"]) if "Thumb" in tags else None,
             tmdb_id=(it.get("ProviderIds") or {}).get("Tmdb"),
             degraded=degraded,
         )

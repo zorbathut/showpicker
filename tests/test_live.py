@@ -60,6 +60,7 @@ def assert_title_ok(client, key):
 def test_library_movie(live):
     d = assert_title_ok(live, first_hit(live, "bad guys", "jellyfin", "movie")["key"])
     assert d["logo"]
+    assert "/Thumb?" in d["gallery"][0]["full"], "this title has Jellyfin title art (Thumb), which should lead"
 
 
 def test_library_series(live):
