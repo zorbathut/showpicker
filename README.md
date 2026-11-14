@@ -37,3 +37,7 @@ node --test tests/js/*.test.mjs  # lineup sync
 .venv/bin/ruff format app tests && .venv/bin/ruff check app tests
 npx --yes @biomejs/biome@2.6.4 check --write app/static tests/js
 ```
+
+## License
+
+MIT; see [LICENSE](LICENSE).
