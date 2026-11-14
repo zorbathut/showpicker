@@ -367,7 +367,7 @@ button:disabled {
 .hide:focus-visible {
   opacity: 1;
 }
-.unhide {
+.card-action {
   margin-top: 6px;
   padding: 2px 10px;
   font-size: 13px;

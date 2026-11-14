@@ -1,5 +1,5 @@
 import { dragActive, dragCancel, dragSortable } from "./drag.js";
-import { orderMoveBefore } from "./order.js";
+import { orderMerge, orderMoveBefore, orderMoveVisible } from "./order.js";
 import { syncCreate } from "./sync.js";
 
 const OLD_STORE_KEY = "showpicker.lineup"; // where lineups lived before they moved to the server; read once for import
@@ -413,8 +413,36 @@ const HIDDEN_TAGLINE = "tagline";
 
 // A title's pictures minus the ones hidden as spoilers. Everything that shows pictures goes through this.
 function galleryOf(d) {
-  const hidden = state.hidden[d.key];
-  return hidden ? d.gallery.filter((p) => !hidden.includes(p.full)) : d.gallery;
+  const hidden = state.hidden[d.key] ?? [];
+  return galleryOrdered(d).filter((p) => !hidden.includes(p.full));
+}
+
+// A title's pictures in display order (its custom order, if any), hidden ones included.
+function galleryOrdered(d) {
+  const byId = new Map(d.gallery.map((p) => [p.full, p]));
+  return orderMerge([...byId.keys()], state.order[d.key]).map((id) => byId.get(id));
+}
+
+// Whether a title's stored picture order actually differs from the default (a stored order can end up matching it, or name only pictures that are gone).
+function orderCustomized(d) {
+  return Boolean(state.order[d.key]) && galleryOrdered(d).some((p, i) => p !== d.gallery[i]);
+}
+
+// Drag-and-drop in Present: `id` was dropped just before the visible picture `beforeId` (null = after the last one).
+function picturesReorder(key, d, id, beforeId) {
+  const full = galleryOrdered(d).map((p) => p.full);
+  const next = orderMoveVisible(
+    full,
+    galleryOf(d).map((p) => p.full),
+    id,
+    beforeId,
+  );
+  const prev = state.order[key] ?? null;
+  // The dragged cell is already where it belongs, so the repaint this triggers has nothing to do.
+  showState.painted.ids = [...showGallery.children].map((c) => c.dataset.image);
+  sync.setOrder(key, next).catch(reportError);
+  showLayout();
+  noticeAction("Pictures reordered.", NOTICE_LONG_MS, "Undo", () => sync.setOrder(key, prev).catch(reportError));
 }
 
 $(".show-tagline .hide").dataset.image = HIDDEN_TAGLINE;
@@ -486,7 +514,8 @@ function cardHtml(key, i) {
       </div>
       <div class="body">
         <div class="meta">${d.logo || heroIsTitleArt ? `<b>${esc(d.title)}</b> · ` : ""}${metaParts(d).map(esc).join(" · ")}</div>
-        ${hiddenParts.length ? `<button type="button" class="unhide" data-act="unhide" title="Show what was hidden as spoilers">${capitalize(hiddenParts.join(" and "))} hidden · show all</button>` : ""}
+        ${hiddenParts.length ? `<button type="button" class="card-action" data-act="unhide" title="Show what was hidden as spoilers">${capitalize(hiddenParts.join(" and "))} hidden · show all</button>` : ""}
+        ${orderCustomized(d) ? `<button type="button" class="card-action" data-act="order-reset" title="Put the pictures back in their default order">Custom picture order · reset</button>` : ""}
         ${d.genres.length ? `<div class="genres">${d.genres.slice(0, 4).map(esc).join(" · ")}</div>` : ""}
         ${d.overview ? `<p class="overview">${esc(d.overview)}</p>` : ""}
         ${
@@ -543,6 +572,9 @@ $("#grid").addEventListener("click", (ev) => {
       break;
     case "unhide":
       sync.hide(card.dataset.key, null, false).catch(reportError);
+      break;
+    case "order-reset":
+      sync.setOrder(card.dataset.key, null).catch(reportError);
       break;
     case "redo": {
       const d = state.details[state.lineup[i]];
@@ -852,7 +884,14 @@ function showPaint() {
       .join("");
     showLayout();
   };
-  if (sameTitle) {
+  if (sameTitle && [...ids].sort().join("\n") === [...painted.ids].sort().join("\n")) {
+    // Same pictures in a new order (reordered on another screen, or Undo): move the existing cells (no reloading or flashing) and stay at the same scroll position rather than following a picture that moved.
+    const top = showScroll.scrollTop;
+    const cellsById = new Map([...showGallery.children].map((cell) => [cell.dataset.image, cell]));
+    showGallery.append(...ids.map((id) => cellsById.get(id)));
+    showLayout();
+    showScroll.scrollTop = top;
+  } else if (sameTitle) {
     // Same title, pictures added back (Undo, "show all"): keep the viewer's place.
     showKeepPlace(new Set(ids), rebuild);
   } else {
@@ -903,6 +942,19 @@ function showKeepPlace(keep, mutate) {
     showScroll.scrollTop += after.getBoundingClientRect().top - before;
   }
 }
+
+dragSortable(
+  showGallery,
+  ".show-cell",
+  (cell) => cell.dataset.image,
+  (id, beforeId) => picturesReorder(showState.painted.key, showState.painted.d, id, beforeId),
+  {
+    scroller: showScroll,
+    topInset: () => 0,
+    canStart: () => !showGallery.classList.contains("poster-only"),
+    onEnd: renderCatchUp,
+  },
+);
 
 showScroll.addEventListener("click", (ev) => {
   const button = ev.target.closest("[data-act=hide]");

@@ -19,7 +19,8 @@ Then open http://localhost:8000. If the container keeps restarting, the configur
 ## Use
 
 * Type a title and press Enter to add the top match, or use ↑/↓ to choose another. Paste a list (one title per line) to add them all at once.
-* On each card: ◀ ▶ reorder, ↺ re-search (wrong match), ✕ remove.
+* Drag cards to reorder the lineup (press and hold first on a touch screen); ◀ ▶ on each card do the same from the keyboard. Also on each card: ↺ re-search (wrong match), ✕ remove.
+* Drag pictures in Present to reorder a title's pictures (the card follows, on every screen); the notice offers Undo, and the card offers "Custom picture order · reset".
 * **▶ Present** opens a fullscreen gallery: the title's logo and details, then its images six to a screen. ↑/↓ scroll a row, ←/→ (or PageUp/PageDown, for presenter clickers) change title, Esc exits. Clicking a card's picture opens it at that picture.
 * **⊘** on a picture (hover a card's thumbnail, or a picture in Present) hides it as a spoiler, on every screen (the tagline in Present has one too); the notice that follows has an Undo, and a card with hidden spoilers offers "… hidden · show all". Curate on a laptop before presenting; a TV remote can't hide pictures.
 * **🎲 Pick one** picks a title at random.
