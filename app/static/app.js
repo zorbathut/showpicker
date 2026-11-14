@@ -1,3 +1,5 @@
+import { dragActive, dragCancel, dragSortable } from "./drag.js";
+import { orderMoveBefore } from "./order.js";
 import { syncCreate } from "./sync.js";
 
 const OLD_STORE_KEY = "showpicker.lineup"; // where lineups lived before they moved to the server; read once for import
@@ -471,7 +473,7 @@ function cardHtml(key, i) {
   return `
     <article class="card${key === state.winnerKey ? " winner" : ""}" ${attrs}>
       <div class="hero" data-act="show" data-img="0" ${hero ? `style="background-image:${esc(cssUrl(hero))}"` : ""}>
-        ${heroIsTitleArt ? "" : d.logo ? `<img class="logo" src="${esc(d.logo)}" alt="${esc(d.title)}">` : `<h2 class="logo-text">${esc(d.title)}</h2>`}
+        ${heroIsTitleArt ? "" : d.logo ? `<img class="logo" draggable="false" src="${esc(d.logo)}" alt="${esc(d.title)}">` : `<h2 class="logo-text">${esc(d.title)}</h2>`}
         ${d.source === "jellyfin" ? `<span class="badge">In library</span>` : ""}
       </div>
       <div class="body">
@@ -484,7 +486,7 @@ function cardHtml(key, i) {
             ? `<div class="stills">${strip
                 .map(
                   (p, n) =>
-                    `<span class="still"><img loading="lazy" src="${esc(p.thumb)}" alt="" data-act="show" data-img="${n + 1}">${hideButton(p.full)}</span>`,
+                    `<span class="still"><img loading="lazy" draggable="false" src="${esc(p.thumb)}" alt="" data-act="show" data-img="${n + 1}">${hideButton(p.full)}</span>`,
                 )
                 .join("")}</div>`
             : ""
@@ -494,7 +496,15 @@ function cardHtml(key, i) {
     </article>`;
 }
 
+// Set when a re-render was skipped because a drag was in progress (it would destroy the drag's placeholder); the drag's end catches up.
+let renderPending = false;
+
 function render() {
+  if (dragActive()) {
+    renderPending = true;
+    return;
+  }
+  renderPending = false;
   $("#grid").innerHTML = state.lineup.map(cardHtml).join("");
   $("#empty").hidden = state.lineup.length > 0;
   showPaint();
@@ -537,6 +547,31 @@ $("#grid").addEventListener("click", (ev) => {
     }
   }
 });
+
+function renderCatchUp() {
+  if (renderPending) {
+    render();
+  }
+}
+
+dragSortable(
+  $("#grid"),
+  ".card",
+  (card) => card.dataset.key,
+  (key, beforeKey) => {
+    const keys = orderMoveBefore(state.lineup, key, beforeKey);
+    // Unchanged when the drop target was removed on another screen mid-drag; an empty edit would still cancel a pending Undo.
+    if (keys.join(",") !== state.lineup.join(",")) {
+      lineupEdit(keys);
+    }
+  },
+  {
+    scroller: null,
+    topInset: () => $(".bar").getBoundingClientRect().bottom,
+    canStart: () => true,
+    onEnd: renderCatchUp,
+  },
+);
 
 // ------------------------------------------------------------------ search box
 
@@ -718,6 +753,7 @@ function showOpen(key, imageIndex) {
 }
 
 function showClose() {
+  dragCancel();
   show.hidden = true;
   $("#grid").before($("#status"), $("#notice"));
   document.body.classList.remove("showing");
@@ -735,6 +771,10 @@ function showColumns(n) {
 
 function showPaint() {
   if (!showIsOpen()) {
+    return;
+  }
+  if (dragActive()) {
+    renderPending = true;
     return;
   }
   const n = state.lineup.length;
@@ -799,7 +839,7 @@ function showPaint() {
     showGallery.innerHTML = cells
       .map(
         (p, i) =>
-          `<div class="show-cell" data-image="${esc(p.full)}"><img src="${esc(p.full)}" alt="" ${i >= SHOW_EAGER_IMAGES ? 'loading="lazy"' : ""}>${posterOnly ? "" : hideButton(p.full)}</div>`,
+          `<div class="show-cell" data-image="${esc(p.full)}"><img draggable="false" src="${esc(p.full)}" alt="" ${i >= SHOW_EAGER_IMAGES ? 'loading="lazy"' : ""}>${posterOnly ? "" : hideButton(p.full)}</div>`,
       )
       .join("");
     showLayout();
@@ -887,6 +927,7 @@ async function showPrefetchNext() {
 }
 
 function showStepTitle(delta) {
+  dragCancel();
   const n = state.lineup.length;
   if (!n) {
     return;
@@ -938,9 +979,13 @@ $(".show-next", show).addEventListener("click", () => showStepTitle(1));
 $(".show-close", show).addEventListener("click", showClose);
 
 document.addEventListener("fullscreenchange", () => {
-  // Esc in fullscreen leaves fullscreen without a keydown reaching us; treat that as leaving the presentation.
+  // Esc in fullscreen leaves fullscreen without a keydown reaching us; treat that as leaving the presentation, unless it was meant to cancel a drag (then stay, windowed).
   if (!document.fullscreenElement && showIsOpen()) {
-    showClose();
+    if (dragActive()) {
+      dragCancel();
+    } else {
+      showClose();
+    }
   }
 });
 
@@ -994,8 +1039,9 @@ async function pickRun() {
     render();
   }
   const i = state.lineup.indexOf(state.winnerKey);
-  if (i >= 0) {
-    $(`#grid .card[data-i="${i}"]`).scrollIntoView({ behavior: "smooth", block: "center" });
+  // Mid-drag the grid isn't re-rendered yet (and scrolling would move it under the pointer).
+  if (i >= 0 && !dragActive()) {
+    $(`#grid .card[data-i="${i}"]`)?.scrollIntoView({ behavior: "smooth", block: "center" });
   }
 }
 

@@ -638,3 +638,29 @@ button:disabled {
     pointer-events: auto;
   }
 }
+
+/* ---------------------------------------------------------------- drag to reorder (drag.js) */
+
+.card,
+.show-cell {
+  -webkit-touch-callout: none;
+}
+body.drag-pressing,
+body.drag-active {
+  user-select: none;
+  -webkit-user-select: none;
+}
+.drag-placeholder {
+  opacity: 0.3;
+}
+.drag-float {
+  z-index: 1000;
+  opacity: 0.85;
+  pointer-events: none;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.6);
+  transition: none;
+}
+/* Mandatory snapping would fight the per-frame auto-scroll. */
+body.drag-active #show .show-scroll {
+  scroll-snap-type: none;
+}
