@@ -20,6 +20,7 @@ const state = {
   undo: null, // the lineup before the last Clear, while no other edit has happened since
   winnerKey: null, // the 🎲 result, highlighted until the next pick
   hidden: {}, // title key -> ids (full URLs) of pictures hidden as spoilers, mirrored from the sync module
+  order: {}, // title key -> custom picture order (ids), mirrored from the sync module
 };
 
 // ------------------------------------------------------------------ utils
@@ -233,6 +234,13 @@ const sync = syncCreate(syncTransport, {
   },
   onHideRefused(message) {
     reportError(new Error(`Couldn't hide or unhide that picture: ${message}`));
+  },
+  onOrder(map) {
+    state.order = map;
+    render();
+  },
+  onOrderRefused(message) {
+    reportError(new Error(`Couldn't reorder those pictures: ${message}`));
   },
   onConnection(ok, error) {
     if (!ok) {
@@ -1060,6 +1068,7 @@ async function boot() {
       const server = await api("/api/lineup");
       sync.start(server);
       state.hidden = sync.hidden();
+      state.order = sync.order();
       state.lineup = [...server.keys];
       break;
     } catch (e) {

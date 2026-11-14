@@ -10,6 +10,8 @@
 // - onRefused(message): the server refused a lineup edit (a bug or a bad import); the server's lineup is taken on the next poll.
 // - onHidden(map): the effective hidden-pictures map ({title key: [image id]}) changed.
 // - onHideRefused(message): the server refused a hide (dropped).
+// - onOrder(map): the effective custom picture order map ({title key: [image id]}) changed.
+// - onOrderRefused(message): the server refused a picture order (dropped).
 // - onConnection(ok, error): connectivity changed (reported on transitions only).
 
 // A shared map {title key: [ids]} kept on the server with its own version: this screen sends idempotent operations (one at a time, resent after failures) and shows the server's last map with its own unconfirmed operations applied on top, so a change that hasn't reached the server yet never flickers back.
@@ -143,6 +145,27 @@ export function syncCreate(transport, callbacks) {
     connection,
   );
 
+  // Custom picture order per title: each operation replaces (or with `images: null` clears) a title's order. Compared exactly, since the order is the point.
+  const order = keyedStoreCreate(
+    {
+      path: "/api/order",
+      field: "order",
+      versionField: "order_version",
+      apply(map, op) {
+        if (op.images === null) {
+          delete map[op.key];
+        } else {
+          map[op.key] = [...op.images];
+        }
+      },
+      same: (a, b) => mapSig(a, false) === mapSig(b, false),
+      onChange: (map) => callbacks.onOrder(map),
+      onRefused: (message) => callbacks.onOrderRefused(message),
+    },
+    transport,
+    connection,
+  );
+
   function connection(ok, error) {
     if (ok !== s.connected) {
       s.connected = ok;
@@ -219,6 +242,9 @@ export function syncCreate(transport, callbacks) {
     if (hidden.pending()) {
       await hidden.send();
     }
+    if (order.pending()) {
+      await order.send();
+    }
     let res;
     try {
       res = await transport("GET", "/api/lineup", null);
@@ -232,6 +258,7 @@ export function syncCreate(transport, callbacks) {
     }
     connection(true);
     hidden.adoptPolled(res.body);
+    order.adoptPolled(res.body);
     // Expected race: this screen's PUT is in flight, so adopting now would briefly overwrite its edit; that PUT's own response (or its 409) settles the state. A GET that left before an edit needs no guard: it can only carry the stamp that edit was based on, or a newer one that makes the PUT 409.
     if (s.pushing) {
       return;
@@ -247,9 +274,15 @@ export function syncCreate(transport, callbacks) {
       stamp(server);
       s.keys = [...server.keys];
       hidden.start(server);
+      order.start(server);
     },
     keys: () => s.keys,
     hidden: () => hidden.map(),
+    order: () => order.map(),
+    // `images` null clears the title's custom order.
+    setOrder(key, images) {
+      return order.change({ key, images });
+    },
     // `image` null with `hidden` false unhides all of that title's pictures.
     hide(key, image, isHidden) {
       return hidden.change({ key, image, hidden: isHidden });

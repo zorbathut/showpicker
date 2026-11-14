@@ -39,6 +39,8 @@ SEARCH_QUERY_MAX = 200
 LINEUP_MAX = 50
 HIDDEN_MAX = 2000
 HIDDEN_IMAGE_MAX_LEN = 1000
+ORDER_IMAGES_MAX = 32  # per title; galleries hold at most 15 pictures
+ORDER_MAX = 2000  # stored ids across all titles
 
 
 class LineupPut(BaseModel):
@@ -57,6 +59,15 @@ class HiddenPost(BaseModel):
     key: str
     image: str | None
     hidden: bool
+
+
+class OrderPost(BaseModel):
+    """Set a title's custom picture order (ids in display order), or clear it with `images: null`."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    key: str
+    images: list[str] | None
 
 
 def lineup_problem(keys: list[str]) -> str | None:
@@ -85,6 +96,9 @@ def app_create(config: Config, transport: httpx.AsyncBaseTransport | None, clock
     # Spoilers hidden per title key, by id: a picture's `full` URL, or `tagline` (the frontend's id for the title's tagline). Versioned separately from the lineup so hiding never makes a lineup edit conflict. Ids come from clients: only ever compared, never rendered.
     hidden: dict[str, list[str]] = {}
     hidden_state = {"version": 0}
+    # Custom picture order per title key (ids in display order), versioned separately like `hidden`. Ids are client-supplied: only compared, never rendered.
+    order: dict[str, list[str]] = {}
+    order_state = {"version": 0}
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
@@ -183,9 +197,49 @@ def app_create(config: Config, transport: httpx.AsyncBaseTransport | None, clock
     def hidden_payload() -> dict:
         return {"instance": lineup["instance"], "hidden_version": hidden_state["version"], "hidden": hidden}
 
+    def order_payload() -> dict:
+        return {"instance": lineup["instance"], "order_version": order_state["version"], "order": order}
+
     @app.get("/api/lineup")
     async def api_lineup_get():
-        return {**lineup, **hidden_payload()}
+        return {**lineup, **hidden_payload(), **order_payload()}
+
+    @app.post("/api/order")
+    async def api_order_post(body: OrderPost):
+        try:
+            title_key_parse(body.key)
+        except ErrorTitleKey as e:
+            raise HTTPException(400, str(e)) from e
+        if body.images is None:
+            changed = order.pop(body.key, None) is not None
+        else:
+            images = body.images
+            if not images:
+                raise HTTPException(400, "An order needs at least one picture (use null to clear it)")
+            if len(images) > ORDER_IMAGES_MAX:
+                raise HTTPException(400, f"Too many pictures in one order ({ORDER_IMAGES_MAX} max)")
+            if any(not image or len(image) > HIDDEN_IMAGE_MAX_LEN for image in images):
+                raise HTTPException(400, f"Picture ids must be 1-{HIDDEN_IMAGE_MAX_LEN} characters")
+            if len(set(images)) != len(images):
+                raise HTTPException(400, "The order lists a picture twice")
+            current = order.get(body.key, [])
+
+            def over_cap() -> bool:
+                return len(images) > len(current) and sum(len(v) for v in order.values()) - len(current) + len(images) > ORDER_MAX
+
+            changed = False
+            if over_cap():
+                # Orders for titles no longer in the lineup have no reset button anywhere; they go first.
+                for key in [k for k in order if k not in lineup["keys"] and k != body.key]:
+                    del order[key]
+                    changed = True
+            if over_cap():
+                raise HTTPException(400, f"Too many custom picture orders ({ORDER_MAX} pictures in all); reset some first")
+            changed = changed or images != current
+            order[body.key] = images
+        if changed:
+            order_state["version"] += 1
+        return order_payload()
 
     @app.post("/api/hidden")
     async def api_hidden_post(body: HiddenPost):

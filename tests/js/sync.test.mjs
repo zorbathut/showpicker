@@ -54,6 +54,8 @@ function recorder() {
       onConnection: (ok) => events.push(["connection", ok]),
       onHidden: (map) => events.push(["hidden", structuredClone(map)]),
       onHideRefused: (message) => events.push(["hideRefused", message]),
+      onOrder: (map) => events.push(["order", structuredClone(map)]),
+      onOrderRefused: (message) => events.push(["orderRefused", message]),
     },
   };
 }
@@ -352,4 +354,81 @@ test("unhide-all clears a title", async () => {
   assert.deepEqual(server.pending[0].body, { key: M, image: null, hidden: false });
   await server.answer(200, hiddenReply(3, {}));
   assert.deepEqual(sync.hidden(), {});
+});
+
+// ---------------------------------------------------------------- custom picture order
+
+function orderReply(version, order, instance = "i1") {
+  return { instance, order_version: version, order };
+}
+
+test("replies without order fields leave the order empty", () => {
+  const { sync } = setup();
+  assert.deepEqual(sync.order(), {});
+});
+
+test("setting an order applies locally at once and POSTs", async () => {
+  const { server, rec, sync } = setup();
+  pending(sync.setOrder(M, ["/b", "/a"]));
+  assert.deepEqual(rec.events, [["order", { [M]: ["/b", "/a"] }]]);
+  assert.deepEqual([server.pending[0].method, server.pending[0].path, server.pending[0].body], ["POST", "/api/order", { key: M, images: ["/b", "/a"] }]);
+  await server.answer(200, orderReply(1, { [M]: ["/b", "/a"] }));
+  assert.equal(rec.events.length, 1, "confirming the same order changes nothing");
+});
+
+test("a pure reorder counts as a change", async () => {
+  const { server, rec, sync } = setup();
+  pending(sync.setOrder(M, ["/a", "/b"]));
+  await server.answer(200, orderReply(1, { [M]: ["/a", "/b"] }));
+  pending(sync.setOrder(M, ["/b", "/a"]));
+  assert.deepEqual(rec.events.at(-1), ["order", { [M]: ["/b", "/a"] }]);
+});
+
+test("a later order for a title wins locally while an earlier one is in flight", async () => {
+  const { server, sync } = setup();
+  pending(sync.setOrder(M, ["/a", "/b", "/c"]));
+  pending(sync.setOrder(M, ["/c", "/b", "/a"]));
+  assert.deepEqual(sync.order(), { [M]: ["/c", "/b", "/a"] });
+  await server.answer(200, orderReply(1, { [M]: ["/a", "/b", "/c"] }));
+  assert.deepEqual(sync.order(), { [M]: ["/c", "/b", "/a"] }, "the queued newer order stays on top");
+  await server.answer(200, orderReply(2, { [M]: ["/c", "/b", "/a"] }));
+  assert.deepEqual(sync.order(), { [M]: ["/c", "/b", "/a"] });
+});
+
+test("an order that fails on the network stays and is resent by the next poll", async () => {
+  const { server, sync } = setup();
+  pending(sync.setOrder(M, ["/b", "/a"]));
+  await server.fail();
+  const polled = sync.poll();
+  await flush();
+  assert.deepEqual([server.pending[0].method, server.pending[0].path], ["POST", "/api/order"]);
+  await server.answer(200, orderReply(1, { [M]: ["/b", "/a"] }));
+  await server.answer(200, { ...START, order_version: 1, order: { [M]: ["/b", "/a"] } });
+  await polled;
+  assert.deepEqual(sync.order(), { [M]: ["/b", "/a"] });
+});
+
+test("polls adopt a newer order version and ignore older ones", async () => {
+  const { server, sync } = setup();
+  let polled = sync.poll();
+  await server.answer(200, { ...START, order_version: 2, order: { [M]: ["/x"] } });
+  await polled;
+  assert.deepEqual(sync.order(), { [M]: ["/x"] });
+  polled = sync.poll();
+  await server.answer(200, { ...START, order_version: 1, order: {} });
+  await polled;
+  assert.deepEqual(sync.order(), { [M]: ["/x"] });
+});
+
+test("clearing an order, and a refused order", async () => {
+  const { server, rec, sync } = setup();
+  pending(sync.setOrder(M, ["/b"]));
+  await server.answer(200, orderReply(1, { [M]: ["/b"] }));
+  pending(sync.setOrder(M, null));
+  assert.deepEqual(sync.order(), {});
+  await server.answer(200, orderReply(2, {}));
+  pending(sync.setOrder("bogus", ["/a"]));
+  await server.answer(400, { detail: "Not a valid title key: 'bogus'" });
+  assert.deepEqual(rec.events.at(-2), ["orderRefused", "Not a valid title key: 'bogus'"]);
+  assert.deepEqual(sync.order(), {});
 });
